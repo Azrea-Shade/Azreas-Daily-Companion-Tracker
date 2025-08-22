@@ -1,3 +1,8 @@
+[![CI Windows Build (testing)](https://github.com/Azrea-Shade/Azreas-Daily-Companion-Tracker/actions/workflows/ci-windows.yml/badge.svg?branch=testing/v1.0.0)](https://github.com/Azrea-Shade/Azreas-Daily-Companion-Tracker/actions/workflows/ci-windows.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Latest Release](https://img.shields.io/github/v/release/Azrea-Shade/Azreas-Daily-Companion-Tracker?include_prereleases&label=latest%20release)](../../releases)
+
+
 # 🌌 Azrea’s Daily Companion Tracker  
 
 A **futuristic AI-powered daily companion desktop app** built for Windows.
@@ -93,3 +98,7 @@ My dad will be the **first tester**, and updates will roll out based on real-wor
 
 **Azrea (azrea-shade)**  
 > A son building tools to make his father’s work easier 💙
+
+---
+
+📄 **Project Vision** → [Read the Vision Document (PDF)](docs/vision_document.pdf)
