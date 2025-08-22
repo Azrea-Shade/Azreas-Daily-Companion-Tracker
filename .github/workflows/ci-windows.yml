@@ -25,15 +25,25 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
           New-Item -ItemType Directory -Force -Path build\logs | Out-Null
+          New-Item -ItemType Directory -Force -Path build\prereq | Out-Null
 
       - name: Build EXE with PyInstaller
         shell: pwsh
         run: |
-          pyinstaller --onefile --noconsole app/main.py --name DailyCompanion --clean 2>&1 |
+          pyinstaller --onefile --noconsole app/main.py --name DailyCompanion --clean `
+            --collect-all PyQt5 `
+            --hidden-import pandas --hidden-import numpy --hidden-import PyQt5.sip 2>&1 |
           Tee-Object -FilePath build\logs\pyinstaller.log
 
       - name: Install Inno Setup
         run: choco install innosetup -y
+
+      - name: Prepare VC++ Redistributable
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -UseBasicParsing `
+            -Uri "https://aka.ms/vs/17/release/vc_redist.x64.exe" `
+            -OutFile "build\prereq\vcredist_x64.exe"
 
       - name: Create Installer
         shell: pwsh

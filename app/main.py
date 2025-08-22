@@ -1,4 +1,4 @@
-import sys, os, json, random, datetime
+import os, sys, json, random, datetime, time
 from pathlib import Path
 
 from PyQt5.QtCore import Qt, QTimer
@@ -6,8 +6,11 @@ from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QLineEdit, QTabWidget, QGroupBox, QGridLayout,
-    QTableWidget, QTableWidgetItem, QMessageBox, QSystemTrayIcon, QMenu
+    QTableWidget, QTableWidgetItem, QMessageBox, QSystemTrayIcon, QMenu,
+    QTextEdit, QListWidget, QListWidgetItem
 )
+
+import requests
 
 try:
     from yahooquery import Ticker
@@ -20,9 +23,9 @@ try:
 except Exception:
     canvas = None
 
-APP_DIR = Path(__file__).resolve().parent
+APP_DIR   = Path(__file__).resolve().parent
 DATA_FILE = APP_DIR / "data.json"
-EXPORT_DIR = APP_DIR.parent / "exports"
+EXPORT_DIR= APP_DIR.parent / "exports"
 EXPORT_DIR.mkdir(exist_ok=True)
 
 QUOTES = [
@@ -41,7 +44,7 @@ def load_data():
             return json.loads(DATA_FILE.read_text())
         except Exception:
             pass
-    return {"watchlist": []}
+    return {"watchlist": [], "last_prices": {}, "last_news_check": 0}
 
 def save_data(data):
     try:
@@ -49,7 +52,7 @@ def save_data(data):
     except Exception as e:
         print("Save error:", e)
 
-# ---------------- UI theme ----------------
+# ---------------- UI Theme ----------------
 ACCENT  = "#00e1ff"
 ACCENT2 = "#ff4dff"
 BG      = "#0b0f1a"
@@ -78,7 +81,11 @@ QTabBar::tab {{ background:#0d1424; padding:10px 16px; margin:2px; border:1px so
   border-top-left-radius:10px; border-top-right-radius:10px; }}
 QTabBar::tab:selected {{ color:{ACCENT}; border-bottom:2px solid {ACCENT}; }}
 QTableWidget {{ background:#0d1424; gridline-color:{BORDER}; border:1px solid {BORDER}; border-radius:10px; }}
+QTextEdit {{ background:#0d1424; border:1px solid {BORDER}; border-radius:10px; padding:10px; }}
 """
+
+LEGAL_WORDS = ["lawsuit", "sues", "sued", "settlement", "bankruptcy", "chapter 11",
+               "restructuring", "investigation", "sec", "fraud", "indictment", "probe"]
 
 # ---------------- Quote Popup ----------------
 class QuotePopup(QWidget):
@@ -108,8 +115,9 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("🌌 Azrea’s Daily Companion Tracker")
-        self.setMinimumSize(980, 640)
+        self.setMinimumSize(1000, 680)
         self.setWindowIcon(QIcon())
+
         self.data = load_data()
 
         self.tabs = QTabWidget()
@@ -118,7 +126,7 @@ class MainWindow(QMainWindow):
         self.dashboard = self._build_dashboard()
         self.search    = self._build_search()
         self.watchlist = self._build_watchlist()
-        self.ai        = self._build_ai_placeholder()
+        self.ai        = self._build_ai_tab()
 
         self.tabs.addTab(self.dashboard, "📊 Dashboard")
         self.tabs.addTab(self.search,    "🔍 Search")
@@ -128,6 +136,10 @@ class MainWindow(QMainWindow):
         self._init_tray()
         self._show_boot_quote()
         self._schedule_next_8am_quote()
+
+        # Background watchers
+        self._start_price_watcher()   # every 5 min
+        self._start_news_watcher()    # every 15 min
 
     # ---------- Dashboard ----------
     def _build_dashboard(self):
@@ -296,10 +308,8 @@ class MainWindow(QMainWindow):
         refresh.clicked.connect(self._refresh_watchlist_table)
         remove = QPushButton("Remove Selected")
         remove.clicked.connect(self._remove_selected)
-        btnrow.addWidget(refresh)
-        btnrow.addWidget(remove)
-        v.addWidget(self.table)
-        v.addLayout(btnrow)
+        btnrow.addWidget(refresh); btnrow.addWidget(remove)
+        v.addWidget(self.table); v.addLayout(btnrow)
         root.addWidget(box)
         self._refresh_watchlist_table()
         return w
@@ -322,9 +332,14 @@ class MainWindow(QMainWindow):
                             r = d.get("regularMarketPrice") or d.get("postMarketPrice")
                             if r is not None:
                                 val = f"${r:.2f}"
+                                # store last price snapshot
+                                try:
+                                    self.data["last_prices"][sym] = float(r)
+                                except Exception: pass
                     except Exception:
                         pass
                     self.table.setItem(row, 1, QTableWidgetItem(val))
+                save_data(self.data)
             except Exception as e:
                 print("Watchlist fetch error:", e)
         else:
@@ -348,16 +363,56 @@ class MainWindow(QMainWindow):
         self.data["watchlist"] = wl
         save_data(self.data)
 
-    # ---------- AI Placeholder ----------
-    def _build_ai_placeholder(self):
+    # ---------- AI Chat ----------
+    def _build_ai_tab(self):
         w = QWidget(); root = QVBoxLayout(w); root.setContentsMargins(16,16,16,16)
-        box = QGroupBox("AI Assistant")
-        v = QVBoxLayout(box)
-        lbl = QLabel("Coming soon: Talk to AI for research, summaries, and guidance.")
-        lbl.setStyleSheet(f"color:{ACCENT}; font-size:16px;")
-        v.addWidget(lbl)
-        root.addWidget(box)
+        wrap = QGroupBox("Ask the AI")
+        v = QVBoxLayout(wrap)
+        self.chat_log = QTextEdit(); self.chat_log.setReadOnly(True)
+        self.chat_input = QLineEdit(); self.chat_input.setPlaceholderText("Ask about a company, market, or strategy…")
+        send = QPushButton("Send")
+        send.clicked.connect(self._send_chat)
+        v.addWidget(self.chat_log)
+        row = QHBoxLayout(); row.addWidget(self.chat_input); row.addWidget(send)
+        v.addLayout(row)
+
+        hint = QLabel("Tip: Set environment variables OPENAI_API_KEY and NEWSAPI_KEY for full features.")
+        hint.setStyleSheet("color:#93a1be; font-size:12px;")
+        root.addWidget(wrap)
+        root.addWidget(hint)
         return w
+
+    def _send_chat(self):
+        prompt = self.chat_input.text().strip()
+        if not prompt:
+            return
+        self.chat_log.append(f"🧑‍💼 You: {prompt}")
+        self.chat_input.clear()
+        key = os.getenv("OPENAI_API_KEY")
+        if not key:
+            self.chat_log.append("🤖 AI: (No OPENAI_API_KEY set. Add it to use the assistant.)")
+            return
+        try:
+            # Minimal chat.completions call; model is adjustable
+            url = "https://api.openai.com/v1/chat/completions"
+            headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+            payload = {
+                "model": "gpt-4o-mini",
+                "messages": [
+                    {"role": "system", "content": "You are a concise financial research assistant."},
+                    {"role": "user", "content": prompt}
+                ],
+                "temperature": 0.5
+            }
+            r = requests.post(url, headers=headers, json=payload, timeout=60)
+            if r.status_code == 200:
+                data = r.json()
+                content = data["choices"][0]["message"]["content"]
+                self.chat_log.append(f"🤖 AI: {content}")
+            else:
+                self.chat_log.append(f"🤖 AI: Error {r.status_code}: {r.text[:300]}")
+        except Exception as e:
+            self.chat_log.append(f"🤖 AI: Error: {e}")
 
     # ---------- Tray & Quotes ----------
     def _init_tray(self):
@@ -410,6 +465,88 @@ class MainWindow(QMainWindow):
             self.next_label.setText(f"⏰ Next 8:00 AM quote in ~ {hrs}h {mins}m")
         except Exception:
             pass
+
+    # ---------- Background watchers ----------
+    def _start_price_watcher(self):
+        self._price_timer = QTimer(self)
+        self._price_timer.timeout.connect(self._check_prices)
+        self._price_timer.start(5 * 60 * 1000)  # every 5 minutes
+
+    def _check_prices(self):
+        wl = self.data.get("watchlist", [])
+        if not wl or Ticker is None:
+            return
+        try:
+            t = Ticker(wl)
+            p = t.price if hasattr(t, "price") else {}
+            changed = []
+            for sym in wl:
+                d = p.get(sym) if p else None
+                nowp = None
+                if d and isinstance(d, dict):
+                    nowp = d.get("regularMarketPrice") or d.get("postMarketPrice")
+                if nowp is None:
+                    continue
+                try:
+                    nowp = float(nowp)
+                    prev = float(self.data.get("last_prices", {}).get(sym, nowp))
+                    if prev > 0:
+                        delta = (nowp - prev) / prev * 100.0
+                        if abs(delta) >= 3.0:  # alert threshold
+                            changed.append((sym, nowp, delta))
+                    self.data.setdefault("last_prices", {})[sym] = nowp
+                except Exception:
+                    pass
+            if changed:
+                msg = "; ".join([f"{s}: {p:.2f} ({d:+.1f}%)" for s,p,d in changed])
+                self.tray.showMessage("Watchlist movement", msg, QSystemTrayIcon.Information, 10000)
+                save_data(self.data)
+        except Exception as e:
+            print("Price watcher error:", e)
+
+    def _start_news_watcher(self):
+        self._news_timer = QTimer(self)
+        self._news_timer.timeout.connect(self._check_news)
+        self._news_timer.start(15 * 60 * 1000) # every 15 minutes
+
+    def _check_news(self):
+        key = os.getenv("NEWSAPI_KEY")
+        if not key:
+            return
+        wl = self.data.get("watchlist", [])
+        if not wl:
+            return
+        now = int(time.time())
+        last = int(self.data.get("last_news_check", 0))
+        # only poll if >= 15 min elapsed
+        if now - last < 10*60:
+            return
+        try:
+            # assemble query
+            q = " OR ".join(wl[:5])  # keep it small
+            url = "https://newsapi.org/v2/everything"
+            params = {
+                "q": q,
+                "language": "en",
+                "pageSize": 10,
+                "sortBy": "publishedAt",
+                "apiKey": key
+            }
+            r = requests.get(url, params=params, timeout=20)
+            if r.status_code == 200:
+                articles = r.json().get("articles", [])
+                alerts = []
+                for a in articles:
+                    title = (a.get("title") or "").lower()
+                    if any(word in title for word in LEGAL_WORDS):
+                        alerts.append(a.get("title") or "Legal/Regulatory headline")
+                if alerts:
+                    msg = " • ".join(alerts[:3])
+                    self.tray.showMessage("Legal/News alert", msg, QSystemTrayIcon.Warning, 12000)
+                self.data["last_news_check"] = now
+                save_data(self.data)
+        except Exception as e:
+            print("News watcher error:", e)
 
 # --------- utils ---------
 def wrap_text(text: str, width: int):
