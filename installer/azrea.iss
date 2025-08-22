@@ -21,10 +21,11 @@ UsePreviousLanguage=yes
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Files]
-; TODO: Update the Source path to your built Windows executable before building the installer.
-; For example, if your build produces dist\Azrea.exe, point to it like below:
+; TODO: Update Source to your built EXE before building installer
+; Example:
 ; Source: "dist\Azrea.exe"; DestDir: "{app}"; Flags: ignoreversion
-; You can add additional runtime files, DLLs, data folders here.
+
+Source: "artworkpp_icon.ico"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\Azrea''s Daily Companion Tracker"; Filename: "{app}\Azrea.exe"; WorkingDir: "{app}"; IconFilename: "{app}pp_icon.ico"; Check: FileExists('{app}\Azrea.exe')
@@ -36,7 +37,3 @@ Name: desktopicon; Description: "Create a &Desktop icon"; GroupDescription: "Add
 [Run]
 Filename: "{app}\Azrea.exe"; Description: "Launch Azrea''s Daily Companion Tracker"; Flags: nowait postinstall skipifsilent; Check: FileExists('{app}\Azrea.exe')
 
-[InstallDelete]
-; Ensure icon is copied to {app} if your app expects it alongside the exe
-
-Source: "artworkpp_icon.ico"; DestDir: "{app}"; Flags: ignoreversion
