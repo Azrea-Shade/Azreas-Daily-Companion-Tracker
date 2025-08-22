@@ -11,6 +11,7 @@ jobs:
     runs-on: windows-latest
     env:
       QT_QPA_PLATFORM: offscreen
+      PYTHONPATH: .
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
