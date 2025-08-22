@@ -1,14 +1,14 @@
-import os, sys, json, random, datetime, time, webbrowser, csv
+import os, sys, json, random, datetime, time, webbrowser, csv, glob
 from pathlib import Path
 
 from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtGui import QIcon
+from PyQt5.QtGui import QIcon, QKeySequence
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QLineEdit, QTabWidget, QGroupBox, QGridLayout,
     QTableWidget, QTableWidgetItem, QSystemTrayIcon, QMenu,
     QTextEdit, QDialog, QFormLayout, QSpinBox, QPlainTextEdit, QCheckBox,
-    QFileDialog
+    QFileDialog, QMessageBox, QShortcut
 )
 
 import requests
@@ -143,8 +143,6 @@ QTextEdit, QPlainTextEdit {{ background:#0d1424; border:1px solid {BORDER}; bord
 """
 
 # ---------------- Settings Dialog ----------------
-from PyQt5.QtWidgets import QMessageBox  # imported late to keep namespace compact
-
 class SettingsDialog(QDialog):
     def __init__(self, cfg: dict, parent=None):
         super().__init__(parent)
@@ -204,6 +202,27 @@ class SettingsDialog(QDialog):
         save_config(self.cfg)
         self.accept()
 
+# ---------------- Quote Popup ----------------
+class QuotePopup(QWidget):
+    def __init__(self, quote: str):
+        super().__init__()
+        self.setWindowTitle("🌟 Daily Motivation")
+        self.setStyleSheet(f"background:{CARD}; border:2px solid {ACCENT}; border-radius:16px;")
+        self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
+        layout = QVBoxLayout(self)
+        title = QLabel("🌟 Daily Motivation")
+        title.setAlignment(Qt.AlignCenter)
+        title.setStyleSheet(f"color:{ACCENT}; font-size:22px; font-weight:600;")
+        quote_lbl = QLabel(f"\n{quote}")
+        quote_lbl.setWordWrap(True)
+        quote_lbl.setAlignment(Qt.AlignCenter)
+        quote_lbl.setStyleSheet("font-size:18px;")
+        ok = QPushButton("Got it")
+        ok.clicked.connect(self.close)
+        ok.setStyleSheet("font-weight:600;")
+        layout.addWidget(title); layout.addWidget(quote_lbl); layout.addWidget(ok, alignment=Qt.AlignCenter)
+        self.resize(520, 240)
+
 # ---------------- Main Window ----------------
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -236,6 +255,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.ai,        "🤖 AI Assistant")
 
         self._init_tray()
+        self._install_shortcuts()
         self._maybe_show_boot_quote()
         self._maybe_schedule_8am_quote()
         self._start_price_watcher()
@@ -244,7 +264,6 @@ class MainWindow(QMainWindow):
 
     # ---------- headless-safe helpers ----------
     def _headless(self) -> bool:
-        # CI sets CI=true; also Qt offscreen on the runner
         try:
             plat = QApplication.platformName().lower()
         except Exception:
@@ -291,9 +310,10 @@ class MainWindow(QMainWindow):
         self.quote_label = QLabel(random.choice(QUOTES))
         self.quote_label.setWordWrap(True)
         self.quote_label.setStyleSheet("font-size:18px;")
-        newq = QPushButton("New Quote ✨")
-        newq.clicked.connect(lambda: self.quote_label.setText(random.choice(QUOTES)))
-        ql.addWidget(self.quote_label); ql.addWidget(newq, alignment=Qt.AlignLeft)
+        newq = QPushButton("New Quote ✨"); newq.clicked.connect(lambda: self.quote_label.setText(random.choice(QUOTES)))
+        brief = QPushButton("Export Morning Brief (PDF)"); brief.clicked.connect(self._export_morning_brief_pdf)
+        btnrow = QHBoxLayout(); btnrow.addWidget(newq); btnrow.addWidget(brief)
+        ql.addWidget(self.quote_label); ql.addLayout(btnrow)
 
         self.next_label = QLabel("")
         self._update_next_8am_label()
@@ -301,6 +321,28 @@ class MainWindow(QMainWindow):
         h.addWidget(title); h.addWidget(subtitle); h.addWidget(qcard); h.addWidget(self.next_label)
         root.addWidget(hero)
         return w
+
+    # ---------- Shortcuts ----------
+    def _install_shortcuts(self):
+        # Tab switching
+        QShortcut(QKeySequence("Ctrl+1"), self, activated=lambda: self.tabs.setCurrentIndex(0))  # Dashboard
+        QShortcut(QKeySequence("Ctrl+2"), self, activated=lambda: self.tabs.setCurrentIndex(1))  # Search
+        QShortcut(QKeySequence("Ctrl+3"), self, activated=lambda: self.tabs.setCurrentIndex(2))  # Watchlist
+        QShortcut(QKeySequence("Ctrl+4"), self, activated=lambda: self.tabs.setCurrentIndex(3))  # AI
+        # Focus search
+        QShortcut(QKeySequence("Ctrl+F"), self, activated=self._focus_search)
+        # Quick export current summary
+        QShortcut(QKeySequence("Ctrl+E"), self, activated=self._export_pdf)
+        # Morning brief
+        QShortcut(QKeySequence("Ctrl+M"), self, activated=self._export_morning_brief_pdf)
+
+    def _focus_search(self):
+        self.tabs.setCurrentWidget(self.search)
+        try:
+            self.search_input.setFocus()
+            self.search_input.selectAll()
+        except Exception:
+            pass
 
     # ---------- Search ----------
     def _build_search(self):
@@ -386,6 +428,57 @@ class MainWindow(QMainWindow):
         desc = item.get("desc") or "—"
         for line in wrap_text(desc, 90): text.textLine(line)
         c.drawText(text); c.showPage(); c.save()
+        self._info("PDF", f"Saved: {fname}")
+
+    # ---------- Morning Brief PDF ----------
+    def _export_morning_brief_pdf(self):
+        if canvas is None:
+            self._warn("PDF", "ReportLab not installed. Add to requirements.txt."); return
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        fname = EXPORT_DIR / f"morning_brief_{ts}.pdf"
+        c = canvas.Canvas(str(fname), pagesize=letter)
+        width, height = letter; y = height - 72
+
+        # Header
+        c.setFont("Helvetica-Bold", 18); c.setFillColorRGB(0, 0.88, 1)
+        c.drawString(72, y, "Morning Brief"); y -= 22
+        c.setFont("Helvetica", 11); c.setFillColorRGB(1,1,1)
+        c.drawString(72, y, f"Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}"); y -= 20
+
+        # Quote
+        c.setFont("Helvetica-Bold", 12); c.drawString(72, y, "Quote:"); y -= 16
+        c.setFont("Helvetica", 11)
+        for line in wrap_text(self.quote_label.text(), 95):
+            c.drawString(72, y, line); y -= 14
+            if y < 72: c.showPage(); y = height - 72
+
+        # Watchlist snapshot
+        wl = self.data.get("watchlist", [])
+        c.setFont("Helvetica-Bold", 12); c.drawString(72, y, "Watchlist:"); y -= 16
+        c.setFont("Helvetica", 11)
+        if wl:
+            last = self.data.get("last_prices", {})
+            for sym in wl:
+                price = last.get(sym, "—")
+                try:
+                    if isinstance(price, (int, float)): price = f"{price:.2f}"
+                except Exception:
+                    pass
+                c.drawString(72, y, f"{sym}: {price}"); y -= 14
+                if y < 72: c.showPage(); y = height - 72
+        else:
+            c.drawString(72, y, "— (no symbols yet)"); y -= 14
+
+        # Last exported summary (if any)
+        c.setFont("Helvetica-Bold", 12); c.drawString(72, y, "Recent Company Summary:"); y -= 16
+        c.setFont("Helvetica", 11)
+        latest = sorted(EXPORT_DIR.glob("*_summary_*.pdf"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if latest:
+            c.drawString(72, y, f"See: {latest[0].name}"); y -= 14
+        else:
+            c.drawString(72, y, "— (none yet)"); y -= 14
+
+        c.showPage(); c.save()
         self._info("PDF", f"Saved: {fname}")
 
     # ---------- Google Drive Upload ----------
@@ -674,7 +767,6 @@ class MainWindow(QMainWindow):
 
     # ---------- Tray & Settings & Quotes ----------
     def _init_tray(self):
-        # Headless or no tray? skip creating one
         if self._headless() or not QSystemTrayIcon.isSystemTrayAvailable():
             self.tray = None
             return
@@ -700,7 +792,6 @@ class MainWindow(QMainWindow):
             self._show_quote(random.choice(QUOTES))
 
     def _show_quote(self, q: str):
-        # In headless, do nothing (no popup)
         if self._headless():
             print(f"[QUOTE] {q}")
             return
