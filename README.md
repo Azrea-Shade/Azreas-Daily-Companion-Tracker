@@ -102,3 +102,9 @@ My dad will be the **first tester**, and updates will roll out based on real-wor
 ---
 
 📄 **Project Vision** → [Read the Vision Document (PDF)](docs/vision_document.pdf)
+
+## Artwork & Installer Assets
+Futuristic neon-on-dark identity for the Windows app. High-contrast cyan glow on deep space blue, optimized for 16×16 legibility.
+
+### Preview
+### Icon Deliverables
