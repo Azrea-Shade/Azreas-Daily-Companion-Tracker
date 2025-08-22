@@ -181,3 +181,34 @@ def get_company_intel(query: str) -> Dict[str, Any]:
         pass
 
     return out
+
+# ---------------- Back-compat wrappers for tests ----------------
+
+def get_wiki_company_summary(query: str) -> dict:
+    """Return {'title','extract','url'} using Wikipedia search+summary."""
+    q = (query or "").strip()
+    try:
+        osr = _wiki_opensearch(q)
+        title = (osr.get("titles") or [q])[0] if osr else q
+    except Exception:
+        title = q
+    try:
+        ws = _wiki_summary(title)
+        return {"title": ws.get("title"), "extract": ws.get("extract"), "url": ws.get("url")}
+    except Exception:
+        return {"title": title, "extract": "", "url": ""}
+
+def get_cik_for_ticker(ticker: str) -> str:
+    """Return CIK string for ticker ('' if not found)."""
+    try:
+        m = _sec_map_for_ticker(ticker)
+        return (m or {}).get("cik", "") or ""
+    except Exception:
+        return ""
+
+def get_recent_filings(cik: str, limit: int = 10) -> list[dict]:
+    """Return recent filings list for a given CIK."""
+    try:
+        return _sec_recent_filings(cik, limit=limit)
+    except Exception:
+        return []
