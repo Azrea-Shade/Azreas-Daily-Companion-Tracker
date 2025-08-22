@@ -6,3 +6,5 @@ yahooquery
 reportlab
 pydrive2
 packaging
+pytest
+pytest-mock

@@ -148,6 +148,9 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.search,    "🔍 Search")
         self.tabs.addTab(self.watchlist, "⭐ Watchlist")
         self.tabs.addTab(self.ai,        "🤖 AI Assistant")
+        self.intel     = self._build_intel_tab()
+        self.tabs.addTab(self.intel,   "🏢 Company Intel")
+
 
         self._init_tray()
         self._show_boot_quote()
