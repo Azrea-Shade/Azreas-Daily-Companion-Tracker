@@ -212,3 +212,14 @@ def get_recent_filings(cik: str, limit: int = 10) -> list[dict]:
         return _sec_recent_filings(cik, limit=limit)
     except Exception:
         return []
+
+# ---- CI fix: ensure CIK is returned as int (not str) ----
+def get_cik_for_ticker(ticker: str) -> int:
+    """Return CIK as int for the given ticker (0 if not found)."""
+    try:
+        m = _sec_map_for_ticker(ticker)
+        cik = (m or {}).get("cik")
+        # Handle strings with leading zeros or ints transparently
+        return int(str(cik)) if cik is not None and str(cik).isdigit() else 0
+    except Exception:
+        return 0
