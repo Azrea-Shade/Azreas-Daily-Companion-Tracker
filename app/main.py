@@ -6,7 +6,7 @@ from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QLineEdit, QTabWidget, QGroupBox, QGridLayout,
-    QTableWidget, QTableWidgetItem, QMessageBox, QSystemTrayIcon, QMenu,
+    QTableWidget, QTableWidgetItem, QSystemTrayIcon, QMenu,
     QTextEdit, QDialog, QFormLayout, QSpinBox, QPlainTextEdit, QCheckBox,
     QFileDialog
 )
@@ -54,13 +54,13 @@ DEFAULT_LEGAL_WORDS = [
 ]
 
 DEFAULT_CONFIG = {
-    "price_alert_pct": 3,          # ±% move to alert
-    "news_poll_minutes": 15,       # minutes between news checks
+    "price_alert_pct": 3,
+    "news_poll_minutes": 15,
     "legal_keywords": ", ".join(DEFAULT_LEGAL_WORDS),
-    "auto_quote_8am": True,        # show daily quote at 8:00 AM
-    "update_check_hours": 24,      # how often to check releases
-    "openai_api_key": "",          # optional storage (falls back to env if blank)
-    "newsapi_key": ""              # optional storage (falls back to env if blank)
+    "auto_quote_8am": True,
+    "update_check_hours": 24,
+    "openai_api_key": "",
+    "newsapi_key": ""
 }
 
 QUOTES = [
@@ -104,7 +104,6 @@ def save_config(cfg):
         print("Config save error:", e)
 
 def cfg_api_key(name, cfg):
-    # prefer config value if present, else env var
     val = (cfg.get(name) or "").strip()
     if val:
         return val
@@ -144,6 +143,8 @@ QTextEdit, QPlainTextEdit {{ background:#0d1424; border:1px solid {BORDER}; bord
 """
 
 # ---------------- Settings Dialog ----------------
+from PyQt5.QtWidgets import QMessageBox  # imported late to keep namespace compact
+
 class SettingsDialog(QDialog):
     def __init__(self, cfg: dict, parent=None):
         super().__init__(parent)
@@ -157,18 +158,15 @@ class SettingsDialog(QDialog):
         self.chk_quote.setChecked(bool(self.cfg.get("auto_quote_8am", True)))
         form.addRow(self.chk_quote)
 
-        self.spin_pct = QSpinBox()
-        self.spin_pct.setRange(1, 50)
+        self.spin_pct = QSpinBox(); self.spin_pct.setRange(1, 50)
         self.spin_pct.setValue(int(self.cfg.get("price_alert_pct", 3)))
         form.addRow("Price alert threshold (%)", self.spin_pct)
 
-        self.spin_news = QSpinBox()
-        self.spin_news.setRange(5, 120)
+        self.spin_news = QSpinBox(); self.spin_news.setRange(5, 120)
         self.spin_news.setValue(int(self.cfg.get("news_poll_minutes", 15)))
         form.addRow("News check interval (minutes)", self.spin_news)
 
-        self.spin_update = QSpinBox()
-        self.spin_update.setRange(1, 168)
+        self.spin_update = QSpinBox(); self.spin_update.setRange(1, 168)
         self.spin_update.setValue(int(self.cfg.get("update_check_hours", 24)))
         form.addRow("Update check interval (hours)", self.spin_update)
 
@@ -177,14 +175,12 @@ class SettingsDialog(QDialog):
         self.txt_legal.setFixedHeight(80)
         form.addRow("Legal keywords (comma-separated)", self.txt_legal)
 
-        self.inp_openai = QLineEdit()
-        self.inp_openai.setEchoMode(QLineEdit.Password)
+        self.inp_openai = QLineEdit(); self.inp_openai.setEchoMode(QLineEdit.Password)
         self.inp_openai.setPlaceholderText("(optional) store OPENAI_API_KEY")
         self.inp_openai.setText(self.cfg.get("openai_api_key",""))
         form.addRow("OpenAI API key", self.inp_openai)
 
-        self.inp_news = QLineEdit()
-        self.inp_news.setEchoMode(QLineEdit.Password)
+        self.inp_news = QLineEdit(); self.inp_news.setEchoMode(QLineEdit.Password)
         self.inp_news.setPlaceholderText("(optional) store NEWSAPI_KEY")
         self.inp_news.setText(self.cfg.get("newsapi_key",""))
         form.addRow("NewsAPI key", self.inp_news)
@@ -207,27 +203,6 @@ class SettingsDialog(QDialog):
         self.cfg["newsapi_key"] = self.inp_news.text().strip()
         save_config(self.cfg)
         self.accept()
-
-# ---------------- Quote Popup ----------------
-class QuotePopup(QWidget):
-    def __init__(self, quote: str):
-        super().__init__()
-        self.setWindowTitle("🌟 Daily Motivation")
-        self.setStyleSheet(f"background:{CARD}; border:2px solid {ACCENT}; border-radius:16px;")
-        self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
-        layout = QVBoxLayout(self)
-        title = QLabel("🌟 Daily Motivation")
-        title.setAlignment(Qt.AlignCenter)
-        title.setStyleSheet(f"color:{ACCENT}; font-size:22px; font-weight:600;")
-        quote_lbl = QLabel(f"\n{quote}")
-        quote_lbl.setWordWrap(True)
-        quote_lbl.setAlignment(Qt.AlignCenter)
-        quote_lbl.setStyleSheet("font-size:18px;")
-        ok = QPushButton("Got it")
-        ok.clicked.connect(self.close)
-        ok.setStyleSheet("font-weight:600;")
-        layout.addWidget(title); layout.addWidget(quote_lbl); layout.addWidget(ok, alignment=Qt.AlignCenter)
-        self.resize(520, 240)
 
 # ---------------- Main Window ----------------
 class MainWindow(QMainWindow):
@@ -266,6 +241,37 @@ class MainWindow(QMainWindow):
         self._start_price_watcher()
         self._start_news_watcher()
         self._maybe_check_updates_silent()
+
+    # ---------- headless-safe helpers ----------
+    def _headless(self) -> bool:
+        # CI sets CI=true; also Qt offscreen on the runner
+        try:
+            plat = QApplication.platformName().lower()
+        except Exception:
+            plat = ""
+        return os.getenv("CI", "").lower() == "true" or plat == "offscreen"
+
+    def _info(self, title: str, text: str):
+        if self._headless():
+            print(f"[INFO] {title}: {text}")
+            return
+        QMessageBox.information(self, title, text)
+
+    def _warn(self, title: str, text: str):
+        if self._headless():
+            print(f"[WARN] {title}: {text}")
+            return
+        QMessageBox.warning(self, title, text)
+
+    def _ask(self, title: str, text: str, default_yes: bool = True):
+        if self._headless():
+            print(f"[ASK] {title}: {text} -> {'Yes' if default_yes else 'No'}")
+            return QMessageBox.Yes if default_yes else QMessageBox.No
+        return QMessageBox.question(
+            self, title, text,
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes if default_yes else QMessageBox.No
+        )
 
     # ---------- Dashboard ----------
     def _build_dashboard(self):
@@ -330,7 +336,7 @@ class MainWindow(QMainWindow):
     def perform_search(self):
         symbol = self.search_input.text().strip().upper()
         if not symbol:
-            QMessageBox.information(self, "Search", "Please enter a ticker symbol (e.g., AAPL)."); return
+            self._info("Search", "Please enter a ticker symbol (e.g., AAPL)."); return
         name = symbol; price = "—"; desc = "No description available."
         if Ticker is not None:
             try:
@@ -354,19 +360,21 @@ class MainWindow(QMainWindow):
 
     def _add_current_to_watchlist(self):
         item = getattr(self, "_last_search", None)
-        if not item: QMessageBox.information(self, "Watchlist", "Search a ticker first."); return
+        if not item:
+            self._info("Watchlist", "Search a ticker first."); return
         wl = self.data.get("watchlist", []); sym = item.get("symbol")
         if sym and sym not in wl:
             wl.append(sym); self.data["watchlist"] = wl; save_data(self.data); self._refresh_watchlist_table()
-            QMessageBox.information(self, "Watchlist", f"Added {sym} to watchlist.")
+            self._info("Watchlist", f"Added {sym} to watchlist.")
         else:
-            QMessageBox.information(self, "Watchlist", f"{sym} is already in watchlist.")
+            self._info("Watchlist", f"{sym} is already in watchlist.")
 
     def _export_pdf(self):
         if canvas is None:
-            QMessageBox.warning(self, "PDF", "ReportLab not installed. Add to requirements.txt."); return
+            self._warn("PDF", "ReportLab not installed. Add to requirements.txt."); return
         item = getattr(self, "_last_search", None)
-        if not item: QMessageBox.information(self, "PDF", "Search a ticker first."); return
+        if not item:
+            self._info("PDF", "Search a ticker first."); return
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         fname = EXPORT_DIR / f"{item['symbol']}_summary_{ts}.pdf"
         c = canvas.Canvas(str(fname), pagesize=letter)
@@ -378,7 +386,7 @@ class MainWindow(QMainWindow):
         desc = item.get("desc") or "—"
         for line in wrap_text(desc, 90): text.textLine(line)
         c.drawText(text); c.showPage(); c.save()
-        QMessageBox.information(self, "PDF", f"Saved: {fname}")
+        self._info("PDF", f"Saved: {fname}")
 
     # ---------- Google Drive Upload ----------
     def _find_client_secrets(self):
@@ -393,14 +401,14 @@ class MainWindow(QMainWindow):
 
     def _ensure_drive(self):
         if GoogleAuth is None or GoogleDrive is None:
-            QMessageBox.warning(self, "Drive", "pydrive2 not installed. (It will be bundled in the installer.)")
+            self._warn("Drive", "pydrive2 not installed. (It will be bundled in the installer.)")
             return None
         secrets = self._find_client_secrets()
         if not secrets:
-            QMessageBox.warning(self, "Drive",
-                                "client_secrets.json not found.\n\n"
-                                "Put it next to DailyCompanion.exe OR in Documents/DailyCompanion.\n"
-                                "See docs/GOOGLE_DRIVE_SETUP.md in the repository.")
+            self._warn("Drive",
+                "client_secrets.json not found.\n\n"
+                "Put it next to DailyCompanion.exe OR in Documents/DailyCompanion.\n"
+                "See docs/GOOGLE_DRIVE_SETUP.md in the repository.")
             return None
         settings = {
             "client_config_file": str(secrets),
@@ -426,7 +434,7 @@ class MainWindow(QMainWindow):
     def _upload_last_pdf(self):
         files = sorted(EXPORT_DIR.glob("*.pdf"), key=lambda p: p.stat().st_mtime, reverse=True)
         if not files:
-            QMessageBox.information(self, "Drive", "No exported PDFs found in the 'exports' folder."); return
+            self._info("Drive", "No exported PDFs found in the 'exports' folder."); return
         drive = self._ensure_drive()
         if not drive: return
         fpath = files[0]
@@ -434,9 +442,9 @@ class MainWindow(QMainWindow):
             f = drive.CreateFile({'title': fpath.name})
             f.SetContentFile(str(fpath))
             f.Upload()
-            QMessageBox.information(self, "Drive", f"Uploaded to Google Drive: {fpath.name}")
+            self._info("Drive", f"Uploaded to Google Drive: {fpath.name}")
         except Exception as e:
-            QMessageBox.warning(self, "Drive", f"Upload failed:\n{e}")
+            self._warn("Drive", f"Upload failed:\n{e}")
 
     # ---------- Watchlist ----------
     def _build_watchlist(self):
@@ -491,7 +499,7 @@ class MainWindow(QMainWindow):
     def _remove_selected(self):
         rows = sorted({i.row() for i in self.table.selectedIndexes()}, reverse=True)
         if not rows:
-            QMessageBox.information(self, "Remove", "Select a row to remove."); return
+            self._info("Remove", "Select a row to remove."); return
         wl = self.data.get("watchlist", [])
         for r in rows:
             sym = self.table.item(r, 0).text()
@@ -514,9 +522,9 @@ class MainWindow(QMainWindow):
                         wl.add(sym); added += 1
             self.data["watchlist"] = sorted(wl)
             save_data(self.data); self._refresh_watchlist_table()
-            QMessageBox.information(self, "Import", f"Imported {added} symbols.")
+            self._info("Import", f"Imported {added} symbols.")
         except Exception as e:
-            QMessageBox.warning(self, "Import", f"Failed to import:\n{e}")
+            self._warn("Import", f"Failed to import:\n{e}")
 
     def _export_watchlist_csv(self):
         path, _ = QFileDialog.getSaveFileName(self, "Export Watchlist CSV", str(ROOT_DIR / "watchlist.csv"), "CSV Files (*.csv)")
@@ -527,9 +535,9 @@ class MainWindow(QMainWindow):
                 w = csv.writer(f)
                 for sym in wl:
                     w.writerow([sym])
-            QMessageBox.information(self, "Export", f"Saved: {path}")
+            self._info("Export", f"Saved: {path}")
         except Exception as e:
-            QMessageBox.warning(self, "Export", f"Failed to export:\n{e}")
+            self._warn("Export", f"Failed to export:\n{e}")
 
     # ---------- AI Chat ----------
     def _build_ai_tab(self):
@@ -609,7 +617,7 @@ class MainWindow(QMainWindow):
         from app.services import get_company_intel
         q = self.intel_input.text().strip()
         if not q:
-            QMessageBox.information(self, "Intel", "Enter a ticker or company name."); return
+            self._info("Intel", "Enter a ticker or company name."); return
         data = get_company_intel(q)
         name = data.get("name") or "—"
         ticker = data.get("ticker") or "—"
@@ -630,10 +638,10 @@ class MainWindow(QMainWindow):
 
     def _export_intel_pdf(self, deep: bool):
         if canvas is None:
-            QMessageBox.warning(self, "PDF", "ReportLab not installed."); return
+            self._warn("PDF", "ReportLab not installed."); return
         intel = getattr(self, "_last_intel", None)
         if not intel:
-            QMessageBox.information(self, "PDF", "Run a Company Intel search first."); return
+            self._info("PDF", "Run a Company Intel search first."); return
         import datetime
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         fname = EXPORT_DIR / f"intel_{(intel['ticker'] or 'company')}_{ts}.pdf"
@@ -662,10 +670,14 @@ class MainWindow(QMainWindow):
         if deep and len(filings) > max_items:
             c.drawString(72, y, f"... (+{len(filings) - max_items} more)")
         c.showPage(); c.save()
-        QMessageBox.information(self, "PDF", f"Saved: {fname}")
+        self._info("PDF", f"Saved: {fname}")
 
     # ---------- Tray & Settings & Quotes ----------
     def _init_tray(self):
+        # Headless or no tray? skip creating one
+        if self._headless() or not QSystemTrayIcon.isSystemTrayAvailable():
+            self.tray = None
+            return
         self.tray = QSystemTrayIcon(self); self.tray.setIcon(QIcon())
         menu = QMenu()
         act_show  = menu.addAction("Show"); act_show.triggered.connect(self.showNormal)
@@ -680,7 +692,6 @@ class MainWindow(QMainWindow):
         dlg = SettingsDialog(self.config, self)
         if dlg.exec_() == QDialog.Accepted:
             self.config = load_config()
-            # Rewire timers with new config
             self._restart_news_timer()
             self._restart_8am_timer()
 
@@ -689,6 +700,10 @@ class MainWindow(QMainWindow):
             self._show_quote(random.choice(QUOTES))
 
     def _show_quote(self, q: str):
+        # In headless, do nothing (no popup)
+        if self._headless():
+            print(f"[QUOTE] {q}")
+            return
         pop = QuotePopup(q); pop.show()
         if not hasattr(self, "_popups"): self._popups = []
         self._popups.append(pop)
@@ -729,7 +744,7 @@ class MainWindow(QMainWindow):
     # ---------- Background watchers ----------
     def _start_price_watcher(self):
         self._price_timer = QTimer(self); self._price_timer.timeout.connect(self._check_prices)
-        self._price_timer.start(5 * 60 * 1000)  # every 5 minutes
+        self._price_timer.start(5 * 60 * 1000)
 
     def _check_prices(self):
         wl = self.data.get("watchlist", [])
@@ -752,7 +767,10 @@ class MainWindow(QMainWindow):
                 except Exception: pass
             if changed:
                 msg = "; ".join([f"{s}: {p:.2f} ({d:+.1f}%)" for s,p,d in changed])
-                self.tray.showMessage("Watchlist movement", msg, QSystemTrayIcon.Information, 10000)
+                if getattr(self, "tray", None) and QSystemTrayIcon.supportsMessages():
+                    self.tray.showMessage("Watchlist movement", msg, QSystemTrayIcon.Information, 10000)
+                else:
+                    print(f"[ALERT] {msg}")
                 save_data(self.data)
         except Exception as e:
             print("Price watcher error:", e)
@@ -791,7 +809,10 @@ class MainWindow(QMainWindow):
                         alerts.append(a.get("title") or "Legal/Regulatory headline")
                 if alerts:
                     msg = " • ".join(alerts[:3])
-                    self.tray.showMessage("Legal/News alert", msg, QSystemTrayIcon.Warning, 12000)
+                    if getattr(self, "tray", None) and QSystemTrayIcon.supportsMessages():
+                        self.tray.showMessage("Legal/News alert", msg, QSystemTrayIcon.Warning, 12000)
+                    else:
+                        print(f"[NEWS] {msg}")
                 self.data["last_news_check"] = now; save_data(self.data)
         except Exception as e:
             print("News watcher error:", e)
@@ -812,21 +833,17 @@ class MainWindow(QMainWindow):
             if resp.status_code == 200:
                 tag = (resp.json().get("tag_name") or "").lstrip("v")
                 if tag and _v.parse(tag) > _v.parse(CURRENT_VERSION):
-                    ans = QMessageBox.question(
-                        self, "Update available",
-                        f"A new version v{tag} is available.\nOpen the Releases page?",
-                        QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes
-                    )
+                    ans = self._ask("Update available", f"A new version v{tag} is available.\nOpen the Releases page?")
                     if ans == QMessageBox.Yes:
                         webbrowser.open(RELEASES_URL)
                 elif manual:
-                    QMessageBox.information(self, "Updates", "You're on the latest version.")
+                    self._info("Updates", "You're on the latest version.")
             else:
                 if manual:
-                    QMessageBox.warning(self, "Updates", f"Update check failed: HTTP {resp.status_code}")
+                    self._warn("Updates", f"Update check failed: HTTP {resp.status_code}")
         except Exception as e:
             if manual:
-                QMessageBox.warning(self, "Updates", f"Update check failed: {e}")
+                self._warn("Updates", f"Update check failed: {e}")
         finally:
             self.data["last_update_check"] = int(time.time()); save_data(self.data)
 
