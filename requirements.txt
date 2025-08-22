@@ -1,2 +1,8 @@
 openai
 newsapi-python
+pyqt5
+requests
+yahooquery
+reportlab
+pydrive2
+packaging
