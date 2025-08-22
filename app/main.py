@@ -1,4 +1,4 @@
-import os, sys, json, random, datetime, time, webbrowser, csv, glob
+import os, sys, json, random, datetime, time, webbrowser, csv
 from pathlib import Path
 
 from PyQt5.QtCore import Qt, QTimer
@@ -8,7 +8,7 @@ from PyQt5.QtWidgets import (
     QLabel, QPushButton, QLineEdit, QTabWidget, QGroupBox, QGridLayout,
     QTableWidget, QTableWidgetItem, QSystemTrayIcon, QMenu,
     QTextEdit, QDialog, QFormLayout, QSpinBox, QPlainTextEdit, QCheckBox,
-    QFileDialog, QMessageBox, QShortcut
+    QFileDialog, QMessageBox, QShortcut, QTimeEdit
 )
 
 import requests
@@ -34,6 +34,12 @@ try:
 except Exception as _e:
     DriveAuthErr = _e
     GoogleAuth = GoogleDrive = None
+
+# Services (company intel)
+try:
+    from app.services import get_company_intel
+except Exception:
+    get_company_intel = None
 
 # ---------------- App Paths & Data ----------------
 APP_DIR    = Path(__file__).resolve().parent
@@ -79,7 +85,13 @@ def load_data():
             return json.loads(DATA_FILE.read_text())
         except Exception:
             pass
-    return {"watchlist": [], "last_prices": {}, "last_news_check": 0, "last_update_check": 0}
+    return {
+        "watchlist": [],
+        "last_prices": {},
+        "last_news_check": 0,
+        "last_update_check": 0,
+        "reminders": []  # [{title, hour, minute, days:[0-6], enabled}]
+    }
 
 def save_data(data):
     try:
@@ -131,7 +143,7 @@ QGroupBox {{
   margin-top: 16px;
 }}
 QGroupBox::title {{ color: {ACCENT}; subcontrol-origin: margin; left: 12px; padding: 0 6px; }}
-QLineEdit {{ background:#0d1424; border:1px solid {BORDER}; border-radius:8px; padding:8px; }}
+QLineEdit, QTimeEdit {{ background:#0d1424; border:1px solid {BORDER}; border-radius:8px; padding:8px; }}
 QPushButton {{ background:#111a2a; border:1px solid {BORDER}; border-radius:10px; padding:10px 16px; }}
 QPushButton:hover {{ border-color:{ACCENT}; }}
 QPushButton:pressed {{ background:#0c1322; }}
@@ -140,69 +152,10 @@ QTabBar::tab {{ background:#0d1424; padding:10px 16px; margin:2px; border:1px so
 QTabBar::tab:selected {{ color:{ACCENT}; border-bottom:2px solid {ACCENT}; }}
 QTableWidget {{ background:#0d1424; gridline-color:{BORDER}; border:1px solid {BORDER}; border-radius:10px; }}
 QTextEdit, QPlainTextEdit {{ background:#0d1424; border:1px solid {BORDER}; border-radius:10px; padding:10px; }}
+QCheckBox {{ spacing: 8px; }}
 """
 
-# ---------------- Settings Dialog ----------------
-class SettingsDialog(QDialog):
-    def __init__(self, cfg: dict, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Settings")
-        self.setStyleSheet(f"background:{CARD};")
-        self.cfg = cfg.copy()
-
-        form = QFormLayout(self)
-
-        self.chk_quote = QCheckBox("Show 8:00 AM quote")
-        self.chk_quote.setChecked(bool(self.cfg.get("auto_quote_8am", True)))
-        form.addRow(self.chk_quote)
-
-        self.spin_pct = QSpinBox(); self.spin_pct.setRange(1, 50)
-        self.spin_pct.setValue(int(self.cfg.get("price_alert_pct", 3)))
-        form.addRow("Price alert threshold (%)", self.spin_pct)
-
-        self.spin_news = QSpinBox(); self.spin_news.setRange(5, 120)
-        self.spin_news.setValue(int(self.cfg.get("news_poll_minutes", 15)))
-        form.addRow("News check interval (minutes)", self.spin_news)
-
-        self.spin_update = QSpinBox(); self.spin_update.setRange(1, 168)
-        self.spin_update.setValue(int(self.cfg.get("update_check_hours", 24)))
-        form.addRow("Update check interval (hours)", self.spin_update)
-
-        self.txt_legal = QPlainTextEdit()
-        self.txt_legal.setPlainText(self.cfg.get("legal_keywords", ", ".join(DEFAULT_LEGAL_WORDS)))
-        self.txt_legal.setFixedHeight(80)
-        form.addRow("Legal keywords (comma-separated)", self.txt_legal)
-
-        self.inp_openai = QLineEdit(); self.inp_openai.setEchoMode(QLineEdit.Password)
-        self.inp_openai.setPlaceholderText("(optional) store OPENAI_API_KEY")
-        self.inp_openai.setText(self.cfg.get("openai_api_key",""))
-        form.addRow("OpenAI API key", self.inp_openai)
-
-        self.inp_news = QLineEdit(); self.inp_news.setEchoMode(QLineEdit.Password)
-        self.inp_news.setPlaceholderText("(optional) store NEWSAPI_KEY")
-        self.inp_news.setText(self.cfg.get("newsapi_key",""))
-        form.addRow("NewsAPI key", self.inp_news)
-
-        row = QHBoxLayout()
-        save = QPushButton("Save"); cancel = QPushButton("Cancel")
-        row.addWidget(save); row.addWidget(cancel)
-        form.addRow(row)
-
-        save.clicked.connect(self._do_save)
-        cancel.clicked.connect(self.reject)
-
-    def _do_save(self):
-        self.cfg["auto_quote_8am"] = self.chk_quote.isChecked()
-        self.cfg["price_alert_pct"] = int(self.spin_pct.value())
-        self.cfg["news_poll_minutes"] = int(self.spin_news.value())
-        self.cfg["update_check_hours"] = int(self.spin_update.value())
-        self.cfg["legal_keywords"] = self.txt_legal.toPlainText().strip()
-        self.cfg["openai_api_key"] = self.inp_openai.text().strip()
-        self.cfg["newsapi_key"] = self.inp_news.text().strip()
-        save_config(self.cfg)
-        self.accept()
-
-# ---------------- Quote Popup ----------------
+# ---------------- Helpers ----------------
 class QuotePopup(QWidget):
     def __init__(self, quote: str):
         super().__init__()
@@ -223,12 +176,22 @@ class QuotePopup(QWidget):
         layout.addWidget(title); layout.addWidget(quote_lbl); layout.addWidget(ok, alignment=Qt.AlignCenter)
         self.resize(520, 240)
 
+def wrap_text(text: str, width: int):
+    out = []; line = ""
+    for word in (text or "").split():
+        if len(line) + len(word) + 1 > width:
+            out.append(line); line = word
+        else:
+            line = word if not line else line + " " + word
+    if line: out.append(line)
+    return out
+
 # ---------------- Main Window ----------------
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("🌌 Azrea’s Daily Companion Tracker")
-        self.setMinimumSize(1000, 700)
+        self.setMinimumSize(1100, 760)
         self.setWindowIcon(QIcon())
 
         self.data = load_data()
@@ -240,18 +203,16 @@ class MainWindow(QMainWindow):
         self.dashboard = self._build_dashboard()
         self.search    = self._build_search()
         self.watchlist = self._build_watchlist()
+        self.reminders = self._build_reminders()
         self.ai        = self._build_ai_tab()
-        # Company Intel tab (requires app/services.py)
-        try:
-            from app.services import get_company_intel  # probe import
+        if get_company_intel:
             self.intel = self._build_intel_tab()
             self.tabs.addTab(self.intel, "🏢 Company Intel")
-        except Exception:
-            pass
 
         self.tabs.addTab(self.dashboard, "📊 Dashboard")
         self.tabs.addTab(self.search,    "🔍 Search")
         self.tabs.addTab(self.watchlist, "⭐ Watchlist")
+        self.tabs.addTab(self.reminders, "⏰ Reminders")
         self.tabs.addTab(self.ai,        "🤖 AI Assistant")
 
         self._init_tray()
@@ -260,6 +221,7 @@ class MainWindow(QMainWindow):
         self._maybe_schedule_8am_quote()
         self._start_price_watcher()
         self._start_news_watcher()
+        self._start_reminder_timer()
         self._maybe_check_updates_silent()
 
     # ---------- headless-safe helpers ----------
@@ -301,7 +263,7 @@ class MainWindow(QMainWindow):
         title = QLabel("🌌 Azrea’s Daily Companion Tracker")
         title.setAlignment(Qt.AlignCenter)
         title.setStyleSheet(f"font-size:28px; color:{ACCENT}; font-weight:700;")
-        subtitle = QLabel("Futuristic companion for research, quotes, and daily flow.")
+        subtitle = QLabel("Futuristic companion for research, quotes, reminders, and daily flow.")
         subtitle.setAlignment(Qt.AlignCenter)
         subtitle.setStyleSheet("font-size:14px; color:#bfc7d6;")
 
@@ -324,16 +286,13 @@ class MainWindow(QMainWindow):
 
     # ---------- Shortcuts ----------
     def _install_shortcuts(self):
-        # Tab switching
         QShortcut(QKeySequence("Ctrl+1"), self, activated=lambda: self.tabs.setCurrentIndex(0))  # Dashboard
         QShortcut(QKeySequence("Ctrl+2"), self, activated=lambda: self.tabs.setCurrentIndex(1))  # Search
         QShortcut(QKeySequence("Ctrl+3"), self, activated=lambda: self.tabs.setCurrentIndex(2))  # Watchlist
-        QShortcut(QKeySequence("Ctrl+4"), self, activated=lambda: self.tabs.setCurrentIndex(3))  # AI
-        # Focus search
+        QShortcut(QKeySequence("Ctrl+4"), self, activated=lambda: self.tabs.setCurrentIndex(3))  # Reminders
+        QShortcut(QKeySequence("Ctrl+5"), self, activated=lambda: self.tabs.setCurrentIndex(4))  # AI
         QShortcut(QKeySequence("Ctrl+F"), self, activated=self._focus_search)
-        # Quick export current summary
         QShortcut(QKeySequence("Ctrl+E"), self, activated=self._export_pdf)
-        # Morning brief
         QShortcut(QKeySequence("Ctrl+M"), self, activated=self._export_morning_brief_pdf)
 
     def _focus_search(self):
@@ -438,21 +397,15 @@ class MainWindow(QMainWindow):
         fname = EXPORT_DIR / f"morning_brief_{ts}.pdf"
         c = canvas.Canvas(str(fname), pagesize=letter)
         width, height = letter; y = height - 72
-
-        # Header
         c.setFont("Helvetica-Bold", 18); c.setFillColorRGB(0, 0.88, 1)
         c.drawString(72, y, "Morning Brief"); y -= 22
         c.setFont("Helvetica", 11); c.setFillColorRGB(1,1,1)
         c.drawString(72, y, f"Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}"); y -= 20
-
-        # Quote
         c.setFont("Helvetica-Bold", 12); c.drawString(72, y, "Quote:"); y -= 16
         c.setFont("Helvetica", 11)
         for line in wrap_text(self.quote_label.text(), 95):
             c.drawString(72, y, line); y -= 14
             if y < 72: c.showPage(); y = height - 72
-
-        # Watchlist snapshot
         wl = self.data.get("watchlist", [])
         c.setFont("Helvetica-Bold", 12); c.drawString(72, y, "Watchlist:"); y -= 16
         c.setFont("Helvetica", 11)
@@ -468,76 +421,341 @@ class MainWindow(QMainWindow):
                 if y < 72: c.showPage(); y = height - 72
         else:
             c.drawString(72, y, "— (no symbols yet)"); y -= 14
-
-        # Last exported summary (if any)
-        c.setFont("Helvetica-Bold", 12); c.drawString(72, y, "Recent Company Summary:"); y -= 16
-        c.setFont("Helvetica", 11)
-        latest = sorted(EXPORT_DIR.glob("*_summary_*.pdf"), key=lambda p: p.stat().st_mtime, reverse=True)
-        if latest:
-            c.drawString(72, y, f"See: {latest[0].name}"); y -= 14
-        else:
-            c.drawString(72, y, "— (none yet)"); y -= 14
-
         c.showPage(); c.save()
         self._info("PDF", f"Saved: {fname}")
 
-    # ---------- Google Drive Upload ----------
-    def _find_client_secrets(self):
-        candidates = [
-            APP_DIR / "client_secrets.json",
-            ROOT_DIR / "client_secrets.json",
-            DOCS_DIR / "client_secrets.json",
-        ]
-        for p in candidates:
-            if p.exists(): return p
-        return None
+    # ---------- Reminders ----------
+    def _build_reminders(self):
+        w = QWidget(); root = QVBoxLayout(w); root.setContentsMargins(16,16,16,16)
+        box = QGroupBox("Daily/Weekday Reminders"); v = QVBoxLayout(box)
+        row1 = QHBoxLayout()
+        self.rem_title = QLineEdit(); self.rem_title.setPlaceholderText("Title (e.g., 'Morning job scans')")
+        self.rem_time = QTimeEdit(); self.rem_time.setDisplayFormat("HH:mm")
+        self.chk_weekdays = [QCheckBox(d) for d in ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]]
+        for c in self.chk_weekdays: c.setChecked(c.text() in ["Mon","Tue","Wed","Thu","Fri"])
+        add = QPushButton("Add Reminder"); add.clicked.connect(self._add_reminder)
+        row1.addWidget(self.rem_title); row1.addWidget(self.rem_time); [row1.addWidget(c) for c in self.chk_weekdays]; row1.addWidget(add)
 
-    def _ensure_drive(self):
-        if GoogleAuth is None or GoogleDrive is None:
-            self._warn("Drive", "pydrive2 not installed. (It will be bundled in the installer.)")
-            return None
-        secrets = self._find_client_secrets()
-        if not secrets:
-            self._warn("Drive",
-                "client_secrets.json not found.\n\n"
-                "Put it next to DailyCompanion.exe OR in Documents/DailyCompanion.\n"
-                "See docs/GOOGLE_DRIVE_SETUP.md in the repository.")
-            return None
-        settings = {
-            "client_config_file": str(secrets),
-            "save_credentials": True,
-            "save_credentials_backend": "file",
-            "save_credentials_file": str(APP_DIR / "token.json"),
-            "get_refresh_token": True,
-            "oauth_scope": ["https://www.googleapis.com/auth/drive.file"],
-        }
-        gauth = GoogleAuth(settings=settings)
-        try:
-            gauth.LoadCredentialsFile(settings["save_credentials_file"])
-        except Exception:
-            pass
-        if not getattr(gauth, "credentials", None) or getattr(gauth.credentials, "access_token_expired", True):
-            try:
-                gauth.LocalWebserverAuth()
-            except Exception:
-                gauth.CommandLineAuth()
-            gauth.SaveCredentialsFile(settings["save_credentials_file"])
-        return GoogleDrive(gauth)
+        self.rem_tbl = QTableWidget(0, 4); self.rem_tbl.setHorizontalHeaderLabels(["Title","Time","Days","Enabled"])
+        self.rem_tbl.horizontalHeader().setStretchLastSection(True)
 
-    def _upload_last_pdf(self):
-        files = sorted(EXPORT_DIR.glob("*.pdf"), key=lambda p: p.stat().st_mtime, reverse=True)
-        if not files:
-            self._info("Drive", "No exported PDFs found in the 'exports' folder."); return
-        drive = self._ensure_drive()
-        if not drive: return
-        fpath = files[0]
+        btns = QHBoxLayout()
+        rm = QPushButton("Remove Selected"); rm.clicked.connect(self._remove_selected_rem)
+        imp = QPushButton("Import CSV"); imp.clicked.connect(self._import_rem_csv)
+        exp = QPushButton("Export CSV"); exp.clicked.connect(self._export_rem_csv)
+        btns.addWidget(rm); btns.addWidget(imp); btns.addWidget(exp)
+
+        v.addLayout(row1); v.addWidget(self.rem_tbl); v.addLayout(btns)
+        root.addWidget(box)
+        self._refresh_reminders()
+        return w
+
+    def _add_reminder(self):
+        t = self.rem_title.text().strip()
+        if not t:
+            self._info("Reminders", "Enter a title."); return
+        qtime = self.rem_time.time()
+        hour, minute = int(qtime.hour()), int(qtime.minute())
+        days = [i for i,c in enumerate(self.chk_weekdays) if c.isChecked()]
+        if not days:
+            self._info("Reminders", "Select at least one day."); return
+        self.data.setdefault("reminders", []).append({
+            "title": t, "hour": hour, "minute": minute, "days": days, "enabled": True
+        })
+        save_data(self.data)
+        self._refresh_reminders()
+        self._info("Reminders", "Added.")
+
+    def _refresh_reminders(self):
+        rems = self.data.get("reminders", [])
+        self.rem_tbl.setRowCount(0)
+        for r in rems:
+            row = self.rem_tbl.rowCount(); self.rem_tbl.insertRow(row)
+            days_names = " ".join(["Mon","Tue","Wed","Thu","Fri","Sat","Sun"][i] for i in r.get("days",[]))
+            self.rem_tbl.setItem(row, 0, QTableWidgetItem(r.get("title","—")))
+            self.rem_tbl.setItem(row, 1, QTableWidgetItem(f'{r.get("hour",0):02d}:{r.get("minute",0):02d}'))
+            self.rem_tbl.setItem(row, 2, QTableWidgetItem(days_names or "—"))
+            self.rem_tbl.setItem(row, 3, QTableWidgetItem("Yes" if r.get("enabled",True) else "No"))
+
+    def _remove_selected_rem(self):
+        rows = sorted({i.row() for i in self.rem_tbl.selectedIndexes()}, reverse=True)
+        if not rows:
+            self._info("Reminders", "Select a row to remove."); return
+        rems = self.data.get("reminders", [])
+        for r in rows:
+            title = self.rem_tbl.item(r,0).text()
+            # remove by title & time match
+            tm = self.rem_tbl.item(r,1).text() if self.rem_tbl.item(r,1) else ""
+            hh, mm = (tm.split(":")+["0","0"])[:2]
+            rems = [x for x in rems if not (x.get("title")==title and f'{x.get("hour",0):02d}:{x.get("minute",0):02d}'==f"{hh}:{mm}")]
+            self.rem_tbl.removeRow(r)
+        self.data["reminders"] = rems; save_data(self.data)
+
+    def _import_rem_csv(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Import Reminders CSV", str(ROOT_DIR), "CSV Files (*.csv)")
+        if not path: return
         try:
-            f = drive.CreateFile({'title': fpath.name})
-            f.SetContentFile(str(fpath))
-            f.Upload()
-            self._info("Drive", f"Uploaded to Google Drive: {fpath.name}")
+            with open(path, newline="") as f:
+                rdr = csv.reader(f)
+                for row in rdr:
+                    if len(row) < 4: continue
+                    title, hh, mm, days_str = row[0], int(row[1]), int(row[2]), row[3]
+                    days = [i for i,d in enumerate(["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]) if d in days_str]
+                    self.data.setdefault("reminders", []).append({"title":title,"hour":hh,"minute":mm,"days":days,"enabled":True})
+            save_data(self.data); self._refresh_reminders()
+            self._info("Import", "Reminders imported.")
         except Exception as e:
-            self._warn("Drive", f"Upload failed:\n{e}")
+            self._warn("Import", f"Failed to import: {e}")
+
+    def _export_rem_csv(self):
+        path, _ = QFileDialog.getSaveFileName(self, "Export Reminders CSV", str(ROOT_DIR / "reminders.csv"), "CSV Files (*.csv)")
+        if not path: return
+        try:
+            with open(path, "w", newline="") as f:
+                w = csv.writer(f)
+                for r in self.data.get("reminders", []):
+                    days_names = " ".join(["Mon","Tue","Wed","Thu","Fri","Sat","Sun"][i] for i in r.get("days",[]))
+                    w.writerow([r.get("title",""), r.get("hour",0), r.get("minute",0), days_names])
+            self._info("Export", f"Saved: {path}")
+        except Exception as e:
+            self._warn("Export", f"Failed to export: {e}")
+
+    def _start_reminder_timer(self):
+        self._rem_timer = QTimer(self); self._rem_timer.timeout.connect(self._tick_reminders)
+        self._rem_timer.start(60 * 1000)  # every minute
+        self._tick_reminders()  # initial check
+
+    def _tick_reminders(self):
+        now = datetime.datetime.now()
+        dow = now.weekday()  # 0=Mon
+        for r in self.data.get("reminders", []):
+            if not r.get("enabled", True): continue
+            if dow not in (r.get("days") or []): continue
+            if now.hour == int(r.get("hour",0)) and now.minute == int(r.get("minute",0)):
+                msg = f"{r.get('title','Reminder')} — {now.strftime('%I:%M %p')}"
+                if getattr(self, "tray", None) and QSystemTrayIcon.supportsMessages() and not self._headless():
+                    self.tray.showMessage("Reminder", msg, QSystemTrayIcon.Information, 10000)
+                else:
+                    print(f"[REMINDER] {msg}")
+
+    # ---------- AI Chat ----------
+    def _build_ai_tab(self):
+        w = QWidget(); root = QVBoxLayout(w); root.setContentsMargins(16,16,16,16)
+        wrap = QGroupBox("Ask the AI"); v = QVBoxLayout(wrap)
+        self.chat_log = QTextEdit(); self.chat_log.setReadOnly(True)
+        self.chat_input = QLineEdit(); self.chat_input.setPlaceholderText("Ask about a company, market, or strategy…")
+        send = QPushButton("Send"); send.clicked.connect(self._send_chat)
+        v.addWidget(self.chat_log)
+        row = QHBoxLayout(); row.addWidget(self.chat_input); row.addWidget(send); v.addLayout(row)
+        hint = QLabel("Tip: Set OPENAI_API_KEY / NEWSAPI_KEY (Settings or Environment).")
+        hint.setStyleSheet("color:#93a1be; font-size:12px;")
+        root.addWidget(wrap); root.addWidget(hint)
+        return w
+
+    def _send_chat(self):
+        prompt = self.chat_input.text().strip()
+        if not prompt: return
+        self.chat_log.append(f"🧑‍💼 You: {prompt}")
+        self.chat_input.clear()
+        key = cfg_api_key("openai_api_key", self.config)
+        if not key:
+            self.chat_log.append("🤖 AI: (No OpenAI key set. Use Settings to add one.)"); return
+        try:
+            url = "https://api.openai.com/v1/chat/completions"
+            headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+            payload = {
+                "model": "gpt-4o-mini",
+                "messages": [
+                    {"role": "system", "content": "You are a concise financial research assistant."},
+                    {"role": "user", "content": prompt}
+                ],
+                "temperature": 0.5
+            }
+            r = requests.post(url, headers=headers, json=payload, timeout=60)
+            if r.status_code == 200:
+                data = r.json(); content = data["choices"][0]["message"]["content"]
+                self.chat_log.append(f"🤖 AI: {content}")
+            else:
+                self.chat_log.append(f"🤖 AI: Error {r.status_code}: {r.text[:300]}")
+        except Exception as e:
+            self.chat_log.append(f"🤖 AI: Error: {e}")
+
+    # ---------- Company Intel ----------
+    def _build_intel_tab(self):
+        w = QWidget(); root = QVBoxLayout(w); root.setContentsMargins(16,16,16,16)
+        row = QHBoxLayout()
+        self.intel_input = QLineEdit(); self.intel_input.setPlaceholderText("Enter ticker (AAPL) or company name (Apple Inc.)")
+        btn = QPushButton("Get Intel"); btn.clicked.connect(self._do_intel_lookup)
+        row.addWidget(self.intel_input); row.addWidget(btn)
+
+        box = QGroupBox("Company Intel"); v = QVBoxLayout(box)
+        self.intel_title  = QLabel("—"); self.intel_title.setStyleSheet(f"color:{ACCENT}; font-size:18px; font-weight:600;")
+        self.intel_ticker = QLabel("—")
+        self.intel_url    = QLabel("")
+        self.intel_summary= QTextEdit(); self.intel_summary.setReadOnly(True); self.intel_summary.setMinimumHeight(120)
+        self.intel_filings= QTextEdit(); self.intel_filings.setReadOnly(True); self.intel_filings.setMinimumHeight(100)
+        self.intel_leads  = QTextEdit(); self.intel_leads.setReadOnly(True); self.intel_leads.setMinimumHeight(100)
+
+        v.addWidget(QLabel("Name:"));    v.addWidget(self.intel_title)
+        v.addWidget(QLabel("Ticker:"));  v.addWidget(self.intel_ticker)
+        v.addWidget(QLabel("Wikipedia:")); v.addWidget(self.intel_url)
+        v.addWidget(QLabel("Summary:")); v.addWidget(self.intel_summary)
+        v.addWidget(QLabel("Recent SEC Filings:")); v.addWidget(self.intel_filings)
+        v.addWidget(QLabel("Leadership & Owners:")); v.addWidget(self.intel_leads)
+
+        brow = QHBoxLayout()
+        qbrief = QPushButton("Export Quick Brief (PDF)"); qbrief.clicked.connect(lambda: self._export_intel_pdf(deep=False))
+        ddeep = QPushButton("Export Deep Dossier (PDF)"); ddeep.clicked.connect(lambda: self._export_intel_pdf(deep=True))
+        brow.addWidget(qbrief); brow.addWidget(ddeep)
+        root.addLayout(row); root.addWidget(box); root.addLayout(brow)
+        return w
+
+    def _do_intel_lookup(self):
+        if not get_company_intel:
+            self._warn("Intel", "services module unavailable."); return
+        q = self.intel_input.text().strip()
+        if not q:
+            self._info("Intel", "Enter a ticker or company name."); return
+        data = get_company_intel(q)
+        name = data.get("name") or "—"
+        ticker = data.get("ticker") or "—"
+        wiki = data.get("wiki") or {}
+        url = wiki.get("url") or ""
+        summary = wiki.get("extract") or "No summary available."
+        filings = data.get("filings") or []
+        leaders = data.get("leadership") or {}
+
+        self.intel_title.setText(name)
+        self.intel_ticker.setText(ticker)
+        self.intel_url.setText(url)
+        self.intel_summary.setPlainText(summary)
+
+        if filings:
+            lines = [f"{f.get('date','—')}  {f.get('form','—')}  {f.get('desc','')}" for f in filings]
+            self.intel_filings.setPlainText("\n".join(lines))
+        else:
+            self.intel_filings.setPlainText("No recent filings found for this ticker (or not provided).")
+
+        parts = []
+        if leaders.get("ceo"):        parts.append("CEO: " + ", ".join(leaders["ceo"]))
+        if leaders.get("chairperson"): parts.append("Chairperson: " + ", ".join(leaders["chairperson"]))
+        if leaders.get("managers"):    parts.append("Managers: " + ", ".join(leaders["managers"]))
+        if leaders.get("owners"):      parts.append("Owners: " + ", ".join(leaders["owners"]))
+        self.intel_leads.setPlainText("\n".join(parts) if parts else "—")
+        self._last_intel = {"name": name, "ticker": ticker, "url": url, "summary": summary, "filings": filings, "leadership": leaders}
+
+    def _export_intel_pdf(self, deep: bool):
+        if canvas is None:
+            self._warn("PDF", "ReportLab not installed."); return
+        intel = getattr(self, "_last_intel", None)
+        if not intel:
+            self._info("PDF", "Run a Company Intel search first."); return
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        fname = EXPORT_DIR / f"intel_{(intel['ticker'] or 'company')}_{ts}.pdf"
+        c = canvas.Canvas(str(fname), pagesize=letter)
+        width, height = letter; y = height - 72
+        c.setFont("Helvetica-Bold", 16); c.setFillColorRGB(0, 0.88, 1)
+        title = f"Company Intel: {intel['name']} ({intel['ticker']})" if intel['ticker'] != "—" else f"Company Intel: {intel['name']}"
+        c.drawString(72, y, title)
+        y -= 24; c.setFont("Helvetica", 11); c.setFillColorRGB(1,1,1)
+        if intel.get("url"): c.drawString(72, y, f"Wikipedia: {intel['url']}")
+        y -= 20
+        c.setFont("Helvetica-Bold", 12); c.drawString(72, y, "Summary:"); y -= 16
+        c.setFont("Helvetica", 11)
+        for line in wrap_text(intel.get("summary") or "—", 95):
+            c.drawString(72, y, line); y -= 14
+            if y < 72: c.showPage(); y = height - 72
+        c.setFont("Helvetica-Bold", 12); c.drawString(72, y, "Recent SEC Filings:"); y -= 16
+        c.setFont("Helvetica", 11)
+        filings = intel.get("filings") or []
+        max_items = 12 if deep else 5
+        for f in filings[:max_items]:
+            line = f"{f.get('date','—')}  {f.get('form','—')}  {f.get('desc','')}"
+            for part in wrap_text(line, 95):
+                c.drawString(72, y, part); y -= 14
+                if y < 72: c.showPage(); y = height - 72
+        if deep and len(filings) > max_items:
+            c.drawString(72, y, f"... (+{len(filings) - max_items} more)")
+        # Leadership
+        y -= 10; c.setFont("Helvetica-Bold", 12); c.drawString(72, y, "Leadership & Owners:"); y -= 16
+        c.setFont("Helvetica", 11)
+        leaders = intel.get("leadership") or {}
+        for key in ["ceo","chairperson","managers","owners"]:
+            vals = leaders.get(key) or []
+            if vals:
+                line = f"{key.capitalize()}: {', '.join(vals)}"
+                for part in wrap_text(line, 95):
+                    c.drawString(72, y, part); y -= 14
+                    if y < 72: c.showPage(); y = height - 72
+        c.showPage(); c.save()
+        self._info("PDF", f"Saved: {fname}")
+
+    # ---------- Tray & Settings & Quotes ----------
+    def _init_tray(self):
+        if self._headless() or not QSystemTrayIcon.isSystemTrayAvailable():
+            self.tray = None
+            return
+        self.tray = QSystemTrayIcon(self); self.tray.setIcon(QIcon())
+        menu = QMenu()
+        act_show  = menu.addAction("Show"); act_show.triggered.connect(self.showNormal)
+        act_settings = menu.addAction("Settings…"); act_settings.triggered.connect(self._open_settings)
+        act_quote = menu.addAction("Show Quote"); act_quote.triggered.connect(lambda: self._show_quote(random.choice(QUOTES)))
+        act_update= menu.addAction("Check for Updates…"); act_update.triggered.connect(lambda: self._check_updates(manual=True))
+        menu.addSeparator()
+        act_quit  = menu.addAction("Quit"); act_quit.triggered.connect(QApplication.instance().quit)
+        self.tray.setContextMenu(menu); self.tray.show()
+
+    def _open_settings(self):
+        dlg = SettingsDialog(self.config, self)
+        if dlg.exec_() == QDialog.Accepted:
+            self.config = load_config()
+            self._restart_news_timer()
+            self._restart_8am_timer()
+
+    def _maybe_show_boot_quote(self):
+        if self.config.get("auto_quote_8am", True):
+            self._show_quote(random.choice(QUOTES))
+
+    def _show_quote(self, q: str):
+        if self._headless():
+            print(f"[QUOTE] {q}")
+            return
+        pop = QuotePopup(q); pop.show()
+        if not hasattr(self, "_popups"): self._popups = []
+        self._popups.append(pop)
+
+    def _maybe_schedule_8am_quote(self):
+        if not self.config.get("auto_quote_8am", True):
+            self.next_label = getattr(self, "next_label", QLabel(""))
+            try: self.next_label.setText("⏰ 8:00 AM quote disabled in Settings")
+            except Exception: pass
+            return
+        now = datetime.datetime.now()
+        target = now.replace(hour=8, minute=0, second=0, microsecond=0)
+        if now >= target: target = target + datetime.timedelta(days=1)
+        msec = int((target - now).total_seconds() * 1000)
+        self.timer8 = QTimer(self); self.timer8.setSingleShot(True)
+        self.timer8.timeout.connect(lambda: (self._show_quote(random.choice(QUOTES)),
+                                             self._maybe_schedule_8am_quote(),
+                                             self._update_next_8am_label()))
+        self.timer8.start(max(msec, 1000))
+        self._update_next_8am_label()
+
+    def _restart_8am_timer(self):
+        if hasattr(self, "timer8"):
+            self.timer8.stop()
+        self._maybe_schedule_8am_quote()
+
+    def _update_next_8am_label(self):
+        if not hasattr(self, "next_label"): return
+        if not self.config.get("auto_quote_8am", True):
+            self.next_label.setText("⏰ 8:00 AM quote disabled in Settings"); return
+        now = datetime.datetime.now()
+        target = now.replace(hour=8, minute=0, second=0, microsecond=0)
+        if now >= target: target = target + datetime.timedelta(days=1)
+        diff = target - now; hrs = diff.seconds // 3600; mins = (diff.seconds % 3600) // 60
+        try: self.next_label.setText(f"⏰ Next 8:00 AM quote in ~ {hrs}h {mins}m")
+        except Exception: pass
 
     # ---------- Watchlist ----------
     def _build_watchlist(self):
@@ -632,205 +850,9 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self._warn("Export", f"Failed to export:\n{e}")
 
-    # ---------- AI Chat ----------
-    def _build_ai_tab(self):
-        w = QWidget(); root = QVBoxLayout(w); root.setContentsMargins(16,16,16,16)
-        wrap = QGroupBox("Ask the AI"); v = QVBoxLayout(wrap)
-        self.chat_log = QTextEdit(); self.chat_log.setReadOnly(True)
-        self.chat_input = QLineEdit(); self.chat_input.setPlaceholderText("Ask about a company, market, or strategy…")
-        send = QPushButton("Send"); send.clicked.connect(self._send_chat)
-        v.addWidget(self.chat_log)
-        row = QHBoxLayout(); row.addWidget(self.chat_input); row.addWidget(send); v.addLayout(row)
-        hint = QLabel("Tip: Set OPENAI_API_KEY / NEWSAPI_KEY (Settings or Environment).")
-        hint.setStyleSheet("color:#93a1be; font-size:12px;")
-        root.addWidget(wrap); root.addWidget(hint)
-        return w
+    # ---------- AI tab defined above ----------
 
-    def _send_chat(self):
-        prompt = self.chat_input.text().strip()
-        if not prompt: return
-        self.chat_log.append(f"🧑‍💼 You: {prompt}")
-        self.chat_input.clear()
-        key = cfg_api_key("openai_api_key", self.config)
-        if not key:
-            self.chat_log.append("🤖 AI: (No OpenAI key set. Use Settings to add one.)"); return
-        try:
-            url = "https://api.openai.com/v1/chat/completions"
-            headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
-            payload = {
-                "model": "gpt-4o-mini",
-                "messages": [
-                    {"role": "system", "content": "You are a concise financial research assistant."},
-                    {"role": "user", "content": prompt}
-                ],
-                "temperature": 0.5
-            }
-            r = requests.post(url, headers=headers, json=payload, timeout=60)
-            if r.status_code == 200:
-                data = r.json(); content = data["choices"][0]["message"]["content"]
-                self.chat_log.append(f"🤖 AI: {content}")
-            else:
-                self.chat_log.append(f"🤖 AI: Error {r.status_code}: {r.text[:300]}")
-        except Exception as e:
-            self.chat_log.append(f"🤖 AI: Error: {e}")
-
-    # ---------- Company Intel ----------
-    def _build_intel_tab(self):
-        from app.services import get_company_intel
-        w = QWidget(); root = QVBoxLayout(w); root.setContentsMargins(16,16,16,16)
-
-        row = QHBoxLayout()
-        self.intel_input = QLineEdit()
-        self.intel_input.setPlaceholderText("Enter ticker (AAPL) or company name (Apple Inc.)")
-        btn = QPushButton("Get Intel"); btn.clicked.connect(self._do_intel_lookup)
-        row.addWidget(self.intel_input); row.addWidget(btn)
-
-        box = QGroupBox("Company Intel"); v = QVBoxLayout(box)
-        self.intel_title  = QLabel("—"); self.intel_title.setStyleSheet(f"color:{ACCENT}; font-size:18px; font-weight:600;")
-        self.intel_ticker = QLabel("—")
-        self.intel_url    = QLabel("")
-        self.intel_summary= QTextEdit(); self.intel_summary.setReadOnly(True); self.intel_summary.setMinimumHeight(160)
-        self.intel_filings= QTextEdit(); self.intel_filings.setReadOnly(True); self.intel_filings.setMinimumHeight(120)
-
-        v.addWidget(QLabel("Name:"));    v.addWidget(self.intel_title)
-        v.addWidget(QLabel("Ticker:"));  v.addWidget(self.intel_ticker)
-        v.addWidget(QLabel("Wikipedia:")); v.addWidget(self.intel_url)
-        v.addWidget(QLabel("Summary:")); v.addWidget(self.intel_summary)
-        v.addWidget(QLabel("Recent SEC Filings:")); v.addWidget(self.intel_filings)
-
-        brow = QHBoxLayout()
-        qbrief = QPushButton("Export Quick Brief (PDF)"); qbrief.clicked.connect(lambda: self._export_intel_pdf(deep=False))
-        ddeep = QPushButton("Export Deep Dossier (PDF)"); ddeep.clicked.connect(lambda: self._export_intel_pdf(deep=True))
-        brow.addWidget(qbrief); brow.addWidget(ddeep)
-
-        root.addLayout(row); root.addWidget(box); root.addLayout(brow)
-        return w
-
-    def _do_intel_lookup(self):
-        from app.services import get_company_intel
-        q = self.intel_input.text().strip()
-        if not q:
-            self._info("Intel", "Enter a ticker or company name."); return
-        data = get_company_intel(q)
-        name = data.get("name") or "—"
-        ticker = data.get("ticker") or "—"
-        wiki = data.get("wiki") or {}
-        url = wiki.get("url") or ""
-        summary = wiki.get("extract") or "No summary available."
-        filings = data.get("filings") or []
-        self.intel_title.setText(name)
-        self.intel_ticker.setText(ticker)
-        self.intel_url.setText(url)
-        self.intel_summary.setPlainText(summary)
-        if filings:
-            lines = [f"{f.get('date','—')}  {f.get('form','—')}  {f.get('desc','')}" for f in filings]
-            self.intel_filings.setPlainText("\n".join(lines))
-        else:
-            self.intel_filings.setPlainText("No recent filings found for this ticker (or not provided).")
-        self._last_intel = {"name": name, "ticker": ticker, "url": url, "summary": summary, "filings": filings}
-
-    def _export_intel_pdf(self, deep: bool):
-        if canvas is None:
-            self._warn("PDF", "ReportLab not installed."); return
-        intel = getattr(self, "_last_intel", None)
-        if not intel:
-            self._info("PDF", "Run a Company Intel search first."); return
-        import datetime
-        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        fname = EXPORT_DIR / f"intel_{(intel['ticker'] or 'company')}_{ts}.pdf"
-        c = canvas.Canvas(str(fname), pagesize=letter)
-        width, height = letter; y = height - 72
-        c.setFont("Helvetica-Bold", 16); c.setFillColorRGB(0, 0.88, 1)
-        title = f"Company Intel: {intel['name']} ({intel['ticker']})" if intel['ticker'] != "—" else f"Company Intel: {intel['name']}"
-        c.drawString(72, y, title)
-        y -= 24; c.setFont("Helvetica", 11); c.setFillColorRGB(1,1,1)
-        if intel.get("url"): c.drawString(72, y, f"Wikipedia: {intel['url']}")
-        y -= 20
-        c.setFont("Helvetica-Bold", 12); c.drawString(72, y, "Summary:"); y -= 16
-        c.setFont("Helvetica", 11)
-        for line in wrap_text(intel.get("summary") or "—", 95):
-            c.drawString(72, y, line); y -= 14
-            if y < 72: c.showPage(); y = height - 72
-        c.setFont("Helvetica-Bold", 12); c.drawString(72, y, "Recent SEC Filings:"); y -= 16
-        c.setFont("Helvetica", 11)
-        filings = intel.get("filings") or []
-        max_items = 12 if deep else 5
-        for f in filings[:max_items]:
-            line = f"{f.get('date','—')}  {f.get('form','—')}  {f.get('desc','')}"
-            for part in wrap_text(line, 95):
-                c.drawString(72, y, part); y -= 14
-                if y < 72: c.showPage(); y = height - 72
-        if deep and len(filings) > max_items:
-            c.drawString(72, y, f"... (+{len(filings) - max_items} more)")
-        c.showPage(); c.save()
-        self._info("PDF", f"Saved: {fname}")
-
-    # ---------- Tray & Settings & Quotes ----------
-    def _init_tray(self):
-        if self._headless() or not QSystemTrayIcon.isSystemTrayAvailable():
-            self.tray = None
-            return
-        self.tray = QSystemTrayIcon(self); self.tray.setIcon(QIcon())
-        menu = QMenu()
-        act_show  = menu.addAction("Show"); act_show.triggered.connect(self.showNormal)
-        act_settings = menu.addAction("Settings…"); act_settings.triggered.connect(self._open_settings)
-        act_quote = menu.addAction("Show Quote"); act_quote.triggered.connect(lambda: self._show_quote(random.choice(QUOTES)))
-        act_update= menu.addAction("Check for Updates…"); act_update.triggered.connect(lambda: self._check_updates(manual=True))
-        menu.addSeparator()
-        act_quit  = menu.addAction("Quit"); act_quit.triggered.connect(QApplication.instance().quit)
-        self.tray.setContextMenu(menu); self.tray.show()
-
-    def _open_settings(self):
-        dlg = SettingsDialog(self.config, self)
-        if dlg.exec_() == QDialog.Accepted:
-            self.config = load_config()
-            self._restart_news_timer()
-            self._restart_8am_timer()
-
-    def _maybe_show_boot_quote(self):
-        if self.config.get("auto_quote_8am", True):
-            self._show_quote(random.choice(QUOTES))
-
-    def _show_quote(self, q: str):
-        if self._headless():
-            print(f"[QUOTE] {q}")
-            return
-        pop = QuotePopup(q); pop.show()
-        if not hasattr(self, "_popups"): self._popups = []
-        self._popups.append(pop)
-
-    def _maybe_schedule_8am_quote(self):
-        if not self.config.get("auto_quote_8am", True):
-            self.next_label = getattr(self, "next_label", QLabel(""))
-            try: self.next_label.setText("⏰ 8:00 AM quote disabled in Settings")
-            except Exception: pass
-            return
-        now = datetime.datetime.now()
-        target = now.replace(hour=8, minute=0, second=0, microsecond=0)
-        if now >= target: target = target + datetime.timedelta(days=1)
-        msec = int((target - now).total_seconds() * 1000)
-        self.timer8 = QTimer(self); self.timer8.setSingleShot(True)
-        self.timer8.timeout.connect(lambda: (self._show_quote(random.choice(QUOTES)),
-                                             self._maybe_schedule_8am_quote(),
-                                             self._update_next_8am_label()))
-        self.timer8.start(max(msec, 1000))
-        self._update_next_8am_label()
-
-    def _restart_8am_timer(self):
-        if hasattr(self, "timer8"):
-            self.timer8.stop()
-        self._maybe_schedule_8am_quote()
-
-    def _update_next_8am_label(self):
-        if not hasattr(self, "next_label"): return
-        if not self.config.get("auto_quote_8am", True):
-            self.next_label.setText("⏰ 8:00 AM quote disabled in Settings"); return
-        now = datetime.datetime.now()
-        target = now.replace(hour=8, minute=0, second=0, microsecond=0)
-        if now >= target: target = target + datetime.timedelta(days=1)
-        diff = target - now; hrs = diff.seconds // 3600; mins = (diff.seconds % 3600) // 60
-        try: self.next_label.setText(f"⏰ Next 8:00 AM quote in ~ {hrs}h {mins}m")
-        except Exception: pass
+    # ---------- Tray & Settings & Quotes defined above ----------
 
     # ---------- Background watchers ----------
     def _start_price_watcher(self):
@@ -858,7 +880,7 @@ class MainWindow(QMainWindow):
                 except Exception: pass
             if changed:
                 msg = "; ".join([f"{s}: {p:.2f} ({d:+.1f}%)" for s,p,d in changed])
-                if getattr(self, "tray", None) and QSystemTrayIcon.supportsMessages():
+                if getattr(self, "tray", None) and QSystemTrayIcon.supportsMessages() and not self._headless():
                     self.tray.showMessage("Watchlist movement", msg, QSystemTrayIcon.Information, 10000)
                 else:
                     print(f"[ALERT] {msg}")
@@ -900,7 +922,7 @@ class MainWindow(QMainWindow):
                         alerts.append(a.get("title") or "Legal/Regulatory headline")
                 if alerts:
                     msg = " • ".join(alerts[:3])
-                    if getattr(self, "tray", None) and QSystemTrayIcon.supportsMessages():
+                    if getattr(self, "tray", None) and QSystemTrayIcon.supportsMessages() and not self._headless():
                         self.tray.showMessage("Legal/News alert", msg, QSystemTrayIcon.Warning, 12000)
                     else:
                         print(f"[NEWS] {msg}")
@@ -938,16 +960,65 @@ class MainWindow(QMainWindow):
         finally:
             self.data["last_update_check"] = int(time.time()); save_data(self.data)
 
-# --------- utils ---------
-def wrap_text(text: str, width: int):
-    out = []; line = ""
-    for word in (text or "").split():
-        if len(line) + len(word) + 1 > width:
-            out.append(line); line = word
-        else:
-            line = word if not line else line + " " + word
-    if line: out.append(line)
-    return out
+# --------- Settings Dialog (at bottom to keep file compact) ---------
+class SettingsDialog(QDialog):
+    def __init__(self, cfg: dict, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Settings")
+        self.setStyleSheet(f"background:{CARD};")
+        self.cfg = cfg.copy()
+
+        form = QFormLayout(self)
+
+        self.chk_quote = QCheckBox("Show 8:00 AM quote")
+        self.chk_quote.setChecked(bool(self.cfg.get("auto_quote_8am", True)))
+        form.addRow(self.chk_quote)
+
+        self.spin_pct = QSpinBox(); self.spin_pct.setRange(1, 50)
+        self.spin_pct.setValue(int(self.cfg.get("price_alert_pct", 3)))
+        form.addRow("Price alert threshold (%)", self.spin_pct)
+
+        self.spin_news = QSpinBox(); self.spin_news.setRange(5, 120)
+        self.spin_news.setValue(int(self.cfg.get("news_poll_minutes", 15)))
+        form.addRow("News check interval (minutes)", self.spin_news)
+
+        self.spin_update = QSpinBox(); self.spin_update.setRange(1, 168)
+        self.spin_update.setValue(int(self.cfg.get("update_check_hours", 24)))
+        form.addRow("Update check interval (hours)", self.spin_update)
+
+        self.txt_legal = QPlainTextEdit()
+        self.txt_legal.setPlainText(self.cfg.get("legal_keywords", ", ".join(DEFAULT_LEGAL_WORDS)))
+        self.txt_legal.setFixedHeight(80)
+        form.addRow("Legal keywords (comma-separated)", self.txt_legal)
+
+        self.inp_openai = QLineEdit(); self.inp_openai.setEchoMode(QLineEdit.Password)
+        self.inp_openai.setPlaceholderText("(optional) store OPENAI_API_KEY")
+        self.inp_openai.setText(self.cfg.get("openai_api_key",""))
+        form.addRow("OpenAI API key", self.inp_openai)
+
+        self.inp_news = QLineEdit(); self.inp_news.setEchoMode(QLineEdit.Password)
+        self.inp_news.setPlaceholderText("(optional) store NEWSAPI_KEY")
+        self.inp_news.setText(self.cfg.get("newsapi_key",""))
+        form.addRow("NewsAPI key", self.inp_news)
+
+        row = QHBoxLayout()
+        save = QPushButton("Save"); cancel = QPushButton("Cancel")
+        row.addWidget(save); row.addWidget(cancel)
+        form.addRow(row)
+
+        save.clicked.connect(self._do_save)
+        cancel.clicked.connect(self.reject)
+
+    def _do_save(self):
+        self.cfg["auto_quote_8am"] = self.chk_quote.isChecked()
+        self.cfg["price_alert_pct"] = int(self.spin_pct.value())
+        self.cfg["news_poll_minutes"] = int(self.spin_news.value())
+        self.cfg["update_check_hours"] = int(self.spin_update.value())
+        self.cfg["legal_keywords"] = self.txt_legal.toPlainText().strip()
+        self.cfg["openai_api_key"] = self.inp_openai.text().strip()
+        self.cfg["newsapi_key"] = self.inp_news.text().strip()
+        save_config(self.cfg)
+        self.accept()
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

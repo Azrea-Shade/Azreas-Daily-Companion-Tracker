@@ -1,156 +1,183 @@
-import os, json, time
+import json, time, re
 from pathlib import Path
-from typing import Dict, Any, Optional, List
-
+from typing import Dict, List, Any
 import requests
 
-SEC_HEADERS = {
-    # SEC requires a descriptive UA with contact email
-    "User-Agent": "DailyCompanion/1.0 (Shade.azrea@gmail.com)"
-}
-TIMEOUT = 12
-CACHE = Path(__file__).resolve().parent / "cache"
-CACHE.mkdir(exist_ok=True)
+ROOT = Path(__file__).resolve().parent.parent
 
-def _get_json(url: str, params: Optional[Dict[str, Any]] = None, headers: Optional[Dict[str, str]] = None) -> Optional[dict]:
-    try:
-        r = requests.get(url, params=params, headers=headers, timeout=TIMEOUT)
-        if r.status_code == 200:
-            return r.json()
-    except Exception:
-        return None
-    return None
+# -------- HTTP helpers (mockable) --------
+def _get_json(url: str, params: dict | None = None, headers: dict | None = None, timeout: int = 20) -> Any:
+    r = requests.get(url, params=params or {}, headers=headers or {}, timeout=timeout)
+    r.raise_for_status()
+    return r.json()
 
-# ---------- Wikipedia ----------
-def wiki_search_title(query: str) -> Optional[str]:
-    # Use Opensearch to get best title
-    data = _get_json("https://en.wikipedia.org/w/api.php", {
-        "action": "opensearch",
-        "search": query,
-        "limit": 1,
-        "namespace": 0,
-        "format": "json"
-    })
-    if not data or len(data) < 2:
-        return None
-    titles = data[1]
-    return titles[0] if titles else None
+def _get(url: str, params: dict | None = None, headers: dict | None = None, timeout: int = 20) -> requests.Response:
+    r = requests.get(url, params=params or {}, headers=headers or {}, timeout=timeout)
+    r.raise_for_status()
+    return r
 
-def wiki_summary(title: str) -> Optional[Dict[str, Any]]:
-    # Wikipedia REST summary
-    title_path = title.replace(" ", "_")
-    data = _get_json(f"https://en.wikipedia.org/api/rest_v1/page/summary/{title_path}")
-    if not data: return None
-    return {
+# -------- Core functions --------
+def _wiki_opensearch(q: str) -> dict:
+    url = "https://en.wikipedia.org/w/api.php"
+    params = {"action":"opensearch","limit":5,"namespace":0,"format":"json","search":q}
+    res = _get_json(url, params=params)
+    # Normalize
+    return {"q": q, "titles": res[1], "descs": res[2], "links": res[3]}
+
+def _wiki_summary(title: str) -> dict:
+    url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{title}"
+    data = _get_json(url)
+    out = {
         "title": data.get("title"),
         "extract": data.get("extract"),
-        "url": (data.get("content_urls") or {}).get("desktop", {}).get("page"),
+        "url": (data.get("content_urls",{}) or {}).get("desktop",{}).get("page"),
+        "wikibase_item": data.get("wikibase_item")
     }
+    return out
 
-def get_wiki_company_summary(query: str) -> Optional[Dict[str, Any]]:
-    title = wiki_search_title(query)
-    if not title: return None
-    return wiki_summary(title)
-
-# ---------- SEC (EDGAR) ----------
-def _load_ticker_cik_cache_path() -> Path:
-    return CACHE / "company_tickers.json"
-
-def _load_ticker_cik_cache() -> Optional[List[Dict[str, Any]]]:
-    p = _load_ticker_cik_cache_path()
-    if p.exists():
+def _wikidata_leadership(qid: str) -> dict:
+    """Return leadership/ownership lists using Wikidata claims. Tries to resolve labels."""
+    if not qid:
+        return {"ceo":[], "chairperson":[], "managers":[], "owners":[]}
+    # get entities with claims + labels
+    url = "https://www.wikidata.org/w/api.php"
+    data = _get_json(url, params={"action":"wbgetentities","ids":qid,"props":"labels|claims","languages":"en","format":"json"})
+    ent = (data.get("entities") or {}).get(qid) or {}
+    labels = ent.get("labels", {})
+    def label_for(id_):
+        # single-entity resolution step if the claim points to another entity
         try:
-            return json.loads(p.read_text())
+            d = _get_json("https://www.wikidata.org/w/api.php",
+                          params={"action":"wbgetentities","ids":id_,"props":"labels","languages":"en","format":"json"})
+            return ((d.get("entities") or {}).get(id_,"").get("labels") or {}).get("en",{}).get("value") or id_
         except Exception:
-            return None
-    return None
+            return id_
 
-def _save_ticker_cik_cache(data: List[Dict[str, Any]]):
+    def pull(claim_prop: str) -> List[str]:
+        out = []
+        for claim in (ent.get("claims",{}).get(claim_prop) or []):
+            mainsnak = claim.get("mainsnak") or {}
+            dv = (mainsnak.get("datavalue") or {}).get("value")
+            if not dv: continue
+            # item link
+            if isinstance(dv, dict) and "id" in dv:
+                out.append(label_for(dv["id"]))
+            # string literal fallback
+            elif isinstance(dv, str):
+                out.append(dv)
+        # uniq while preserving order
+        uniq = []
+        for n in out:
+            if n and n not in uniq:
+                uniq.append(n)
+        return uniq
+
+    leadership = {
+        "ceo":        pull("P169"),   # CEO
+        "chairperson":pull("P488"),   # chairperson
+        "managers":   pull("P1037"),  # manager/director
+        "owners":     pull("P127"),   # owned by
+    }
+    return leadership
+
+def _sec_map_for_ticker(ticker: str) -> dict:
+    """Get SEC mapping for a ticker -> CIK/official name; use cached public JSON if available."""
+    url = "https://www.sec.gov/files/company_tickers.json"
+    # Set a respectful User-Agent with contact; replace email as needed in main app configs.
+    headers = {"User-Agent": "DailyCompanion/1.0 (contact: shade.azrea@gmail.com)"}
     try:
-        _load_ticker_cik_cache_path().write_text(json.dumps(data))
+        data = _get_json(url, headers=headers, timeout=30)
+    except Exception:
+        return {}
+    # data like {"0": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple Inc."}, ...}
+    for _, row in data.items():
+        if (row.get("ticker") or "").upper() == ticker.upper():
+            return {"cik": str(row.get("cik_str")), "ticker": row.get("ticker"), "title": row.get("title")}
+    return {}
+
+def _sec_recent_filings(cik: str, limit: int = 10) -> List[dict]:
+    if not cik: return []
+    url = f"https://data.sec.gov/submissions/CIK{int(cik):010d}.json"
+    headers = {"User-Agent": "DailyCompanion/1.0 (contact: shade.azrea@gmail.com)"}
+    try:
+        data = _get_json(url, headers=headers, timeout=30)
+    except Exception:
+        return []
+    rec = ((data.get("filings") or {}).get("recent") or {})
+    forms   = rec.get("form") or []
+    dates   = rec.get("filingDate") or []
+    descs   = rec.get("primaryDocDescription") or []
+    out = []
+    for i in range(min(len(forms), len(dates), len(descs), limit)):
+        out.append({"form": forms[i], "date": dates[i], "desc": descs[i]})
+    return out
+
+def get_company_intel(query: str) -> Dict[str, Any]:
+    """
+    Aggregates:
+      - Wikipedia summary (+ url)
+      - SEC: ticker → CIK → recent filings
+      - Wikidata: leadership (ceo, chairperson, managers) and owners
+    Returns dict with keys: name, ticker, wiki{title, url, extract}, filings[], leadership{}
+    """
+    q = (query or "").strip()
+    out = {"name":"", "ticker":"", "wiki":{}, "filings":[], "leadership":{"ceo":[], "chairperson":[], "managers":[], "owners":[]}}
+
+    # Try ticker mapping first if looks like a ticker
+    is_ticker = len(q) <= 6 and q.upper() == q and re.fullmatch(r"[A-Z.\-]+", q or "") is not None
+    title = None
+    wiki_qid = None
+
+    try:
+        if not is_ticker:
+            # Use opensearch to get canonical title
+            osr = _wiki_opensearch(q)
+            title = (osr.get("titles") or [None])[0]
+        else:
+            # Map ticker to official title via SEC (often matches Wikipedia)
+            sec = _sec_map_for_ticker(q.upper())
+            if sec:
+                out["ticker"] = sec.get("ticker") or q.upper()
+                out["name"]   = sec.get("title") or q.upper()
+                title = sec.get("title")
+            else:
+                title = q  # fallback
+    except Exception:
+        title = q
+
+    # Wikipedia summary
+    try:
+        if title:
+            ws = _wiki_summary(title)
+            out["wiki"] = ws
+            out["name"] = out["name"] or (ws.get("title") or "")
+            wiki_qid = ws.get("wikibase_item")
     except Exception:
         pass
 
-def refresh_ticker_cik_cache() -> Optional[List[Dict[str, Any]]]:
-    # Download once; SEC serves a JSON mapping of tickers->CIK
-    # https://www.sec.gov/files/company_tickers.json (object with numeric keys)
-    data = _get_json("https://www.sec.gov/files/company_tickers.json", headers=SEC_HEADERS)
-    if not data:
-        return None
-    arr: List[Dict[str, Any]] = []
-    for _, row in data.items():
-        # {cik_str, title, ticker}
-        arr.append({
-            "cik": int(row.get("cik_str") or 0),
-            "ticker": (row.get("ticker") or "").upper(),
-            "title": row.get("title") or ""
-        })
-    _save_ticker_cik_cache(arr)
-    return arr
+    # SEC filings (if we have/guess ticker)
+    try:
+        if not out.get("ticker") and is_ticker:
+            out["ticker"] = q.upper()
+        # Try sec mapping again if needed
+        if not out.get("name") or not out.get("ticker"):
+            sec2 = _sec_map_for_ticker(out.get("ticker") or q)
+            if sec2:
+                out["ticker"] = sec2.get("ticker") or out.get("ticker")
+                out["name"] = out["name"] or sec2.get("title")
+                out["filings"] = _sec_recent_filings(sec2.get("cik"))
+        else:
+            sec2 = _sec_map_for_ticker(out["ticker"])
+            if sec2:
+                out["filings"] = _sec_recent_filings(sec2.get("cik"))
+    except Exception:
+        pass
 
-def get_cik_for_ticker(symbol: str) -> Optional[int]:
-    symbol = (symbol or "").upper()
-    cache = _load_ticker_cik_cache()
-    if not cache:
-        cache = refresh_ticker_cik_cache()
-    if not cache:
-        return None
-    for row in cache:
-        if row.get("ticker") == symbol:
-            return int(row.get("cik") or 0)
-    return None
+    # Wikidata leadership/ownership
+    try:
+        if wiki_qid:
+            out["leadership"] = _wikidata_leadership(wiki_qid)
+    except Exception:
+        pass
 
-def get_recent_filings_by_cik(cik: int, limit: int = 5) -> List[Dict[str, Any]]:
-    # https://data.sec.gov/submissions/CIK##########.json
-    if not cik: return []
-    cik_str = f"{int(cik):010d}"
-    data = _get_json(f"https://data.sec.gov/submissions/CIK{cik_str}.json", headers=SEC_HEADERS)
-    if not data: return []
-    filings = data.get("filings", {}).get("recent", {})
-    forms  = filings.get("form", [])[:limit]
-    dates  = filings.get("filingDate", [])[:limit]
-    descs  = filings.get("primaryDocDescription", [])[:limit]
-    out = []
-    for i in range(min(len(forms), len(dates))):
-        out.append({
-            "form": forms[i],
-            "date": dates[i],
-            "desc": (descs[i] or "").strip() if i < len(descs) else ""
-        })
     return out
-
-# ---------- High-level aggregator ----------
-def get_company_intel(query: str) -> Dict[str, Any]:
-    """
-    query can be a ticker (e.g., 'AAPL') or a company name.
-    Returns: {
-      'ticker': str|None,
-      'name': str|None,
-      'wiki': {'title','extract','url'}|None,
-      'filings': list of {form,date,desc}
-    }
-    """
-    q = (query or "").strip()
-    if not q:
-        return {"ticker": None, "name": None, "wiki": None, "filings": []}
-
-    # Heuristic: if alnum <=5 treat as ticker
-    ticker_guess = q.upper() if q.isalnum() and len(q) <= 5 else None
-    name_guess = None
-
-    wiki = get_wiki_company_summary(q)
-    if wiki and wiki.get("title"):
-        name_guess = wiki.get("title")
-
-    filings = []
-    if ticker_guess:
-        cik = get_cik_for_ticker(ticker_guess)
-        if cik:
-            filings = get_recent_filings_by_cik(cik, limit=5)
-
-    return {
-        "ticker": ticker_guess,
-        "name": name_guess,
-        "wiki": wiki,
-        "filings": filings
-    }
