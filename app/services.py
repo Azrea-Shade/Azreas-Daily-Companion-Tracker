@@ -223,3 +223,11 @@ def get_cik_for_ticker(ticker: str) -> int:
         return int(str(cik)) if cik is not None and str(cik).isdigit() else 0
     except Exception:
         return 0
+
+
+def get_recent_filings_by_cik(cik: int | str, limit: int = 10) -> list[dict]:
+    """Alias for tests; accepts int/str CIK and forwards to get_recent_filings."""
+    try:
+        return get_recent_filings(str(cik), limit=limit)
+    except Exception:
+        return []

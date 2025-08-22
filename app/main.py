@@ -328,7 +328,7 @@ class MainWindow(QMainWindow):
         btnrow = QHBoxLayout()
         addfav = QPushButton("Add to Watchlist ⭐"); addfav.clicked.connect(self._add_current_to_watchlist)
         export_pdf = QPushButton("Export Summary (PDF)"); export_pdf.clicked.connect(self._export_pdf)
-        upload_pdf = QPushButton("Upload Last PDF to Drive"); upload_pdf.clicked.connect(self._upload_last_pdf)
+        upload_pdf = QPushButton("Upload Last PDF to Drive"); upload_pdf.clicked.connect(getattr(self, "_upload_last_pdf", lambda: self._info("Drive", "Upload not configured (no Google Drive setup).")))
         btnrow.addWidget(addfav); btnrow.addWidget(export_pdf); btnrow.addWidget(upload_pdf)
 
         root.addLayout(row); root.addWidget(self.result_box); root.addLayout(btnrow)
@@ -1102,6 +1102,16 @@ try:
     if not hasattr(MainWindow, "_upload_last_pdf"):
         def __dc_stub_upload(self):
             # Minimal no-op for tests; real upload provided by Drive helpers when configured
+            self._info("Drive", "Upload not configured (no Google Drive setup).")
+        MainWindow._upload_last_pdf = __dc_stub_upload
+except Exception:
+    pass
+
+
+# --- CI-safe: ensure _upload_last_pdf exists even without Drive setup ---
+try:
+    if not hasattr(MainWindow, "_upload_last_pdf"):
+        def __dc_stub_upload(self):
             self._info("Drive", "Upload not configured (no Google Drive setup).")
         MainWindow._upload_last_pdf = __dc_stub_upload
 except Exception:
