@@ -19,26 +19,40 @@ jobs:
           python-version: "3.10"
 
       - name: Install dependencies
+        shell: pwsh
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pyinstaller
+          New-Item -ItemType Directory -Force -Path build\logs | Out-Null
 
       - name: Build EXE with PyInstaller
+        shell: pwsh
         run: |
-          pyinstaller --onefile --noconsole app/main.py --name DailyCompanion
+          pyinstaller --onefile --noconsole app/main.py --name DailyCompanion --clean 2>&1 |
+          Tee-Object -FilePath build\logs\pyinstaller.log
 
       - name: Install Inno Setup
         run: choco install innosetup -y
 
       - name: Create Installer
+        shell: pwsh
         run: |
-          "C:\\Program Files (x86)\\Inno Setup 6\\ISCC.exe" installer.iss
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss 2>&1 |
+          Tee-Object -FilePath build\logs\inno_build.log
 
-      - name: Upload Artifacts
+      - name: Upload Artifacts (binaries)
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: DailyCompanion-Windows
           path: |
             dist/DailyCompanion.exe
             dist/DailyCompanionInstaller.exe
+
+      - name: Upload Build Logs (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: build/logs/*
