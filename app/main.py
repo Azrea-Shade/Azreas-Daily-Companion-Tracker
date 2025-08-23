@@ -1,5 +1,7 @@
 import os, sys, json, random, datetime, time, webbrowser, csv
 from pathlib import Path
+import logging
+from app.utils import init_logger, is_windows, enable_startup, is_startup_enabled
 
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QIcon, QKeySequence
@@ -49,6 +51,7 @@ CONFIG_FILE= APP_DIR / "config.json"
 EXPORT_DIR = ROOT_DIR / "exports"
 EXPORT_DIR.mkdir(exist_ok=True)
 DOCS_DIR   = Path.home() / "Documents" / "DailyCompanion"
+LOGGER = init_logger()
 DOCS_DIR.mkdir(parents=True, exist_ok=True)
 
 CURRENT_VERSION = "1.0.0"
@@ -60,6 +63,8 @@ DEFAULT_LEGAL_WORDS = [
 ]
 
 DEFAULT_CONFIG = {
+    "minimize_to_tray": False,
+    "launch_minimized": False,
     "price_alert_pct": 3,
     "news_poll_minutes": 15,
     "legal_keywords": ", ".join(DEFAULT_LEGAL_WORDS),
@@ -192,7 +197,11 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("🌌 Azrea’s Daily Companion Tracker")
         self.setMinimumSize(1100, 760)
-        self.setWindowIcon(QIcon())
+        icon_path = APP_DIR / "assets" / "app_icon.ico"
+        if icon_path.exists():
+            self.setWindowIcon(QIcon(str(icon_path)))
+        else:
+            self.setWindowIcon(QIcon())
 
         self.data = load_data()
         self.config = load_config()
@@ -223,6 +232,13 @@ class MainWindow(QMainWindow):
         self._start_news_watcher()
         self._start_reminder_timer()
         self._maybe_check_updates_silent()
+
+        # Honor launch_minimized setting
+        try:
+            if self.config.get("launch_minimized", False) and not self._headless():
+                self.hide()
+        except Exception:
+            pass
 
     # ---------- headless-safe helpers ----------
     def _headless(self) -> bool:
@@ -274,7 +290,12 @@ class MainWindow(QMainWindow):
         self.quote_label.setStyleSheet("font-size:18px;")
         newq = QPushButton("New Quote ✨"); newq.clicked.connect(lambda: self.quote_label.setText(random.choice(QUOTES)))
         brief = QPushButton("Export Morning Brief (PDF)"); brief.clicked.connect(self._export_morning_brief_pdf)
-        btnrow = QHBoxLayout(); btnrow.addWidget(newq); btnrow.addWidget(brief)
+        btnrow = QHBoxLayout();
+        open_exports = QPushButton("Open Exports Folder")
+        open_exports.clicked.connect(lambda: webbrowser.open(str(EXPORT_DIR)))
+        open_logs = QPushButton("Open Logs Folder")
+        open_logs.clicked.connect(lambda: webbrowser.open(str(DOCS_DIR / "logs")))
+        btnrow.addWidget(newq); btnrow.addWidget(brief); btnrow.addWidget(open_exports); btnrow.addWidget(open_logs)
         ql.addWidget(self.quote_label); ql.addLayout(btnrow)
 
         self.next_label = QLabel("")
@@ -366,7 +387,7 @@ class MainWindow(QMainWindow):
         wl = self.data.get("watchlist", []); sym = item.get("symbol")
         if sym and sym not in wl:
             wl.append(sym); self.data["watchlist"] = wl; save_data(self.data); self._refresh_watchlist_table()
-            self._info("Watchlist", f"Added {sym} to watchlist.")
+            LOGGER.info(f"Watchlist add: {sym}"); self._info("Watchlist", f"Added {sym} to watchlist.")
         else:
             self._info("Watchlist", f"{sym} is already in watchlist.")
 
@@ -387,7 +408,7 @@ class MainWindow(QMainWindow):
         desc = item.get("desc") or "—"
         for line in wrap_text(desc, 90): text.textLine(line)
         c.drawText(text); c.showPage(); c.save()
-        self._info("PDF", f"Saved: {fname}")
+        LOGGER.info(f"PDF saved: {fname}"); self._info("PDF", f"Saved: {fname}")
 
     # ---------- Morning Brief PDF ----------
     def _export_morning_brief_pdf(self):
@@ -422,7 +443,7 @@ class MainWindow(QMainWindow):
         else:
             c.drawString(72, y, "— (no symbols yet)"); y -= 14
         c.showPage(); c.save()
-        self._info("PDF", f"Saved: {fname}")
+        LOGGER.info(f"PDF saved: {fname}"); self._info("PDF", f"Saved: {fname}")
 
     # ---------- Reminders ----------
     def _build_reminders(self):
@@ -688,14 +709,16 @@ class MainWindow(QMainWindow):
                     c.drawString(72, y, part); y -= 14
                     if y < 72: c.showPage(); y = height - 72
         c.showPage(); c.save()
-        self._info("PDF", f"Saved: {fname}")
+        LOGGER.info(f"PDF saved: {fname}"); self._info("PDF", f"Saved: {fname}")
 
     # ---------- Tray & Settings & Quotes ----------
     def _init_tray(self):
         if self._headless() or not QSystemTrayIcon.isSystemTrayAvailable():
             self.tray = None
             return
-        self.tray = QSystemTrayIcon(self); self.tray.setIcon(QIcon())
+        self.tray = QSystemTrayIcon(self);
+        icon_path = APP_DIR / "assets" / "app_icon.ico"
+        self.tray.setIcon(QIcon(str(icon_path)) if icon_path.exists() else QIcon())
         menu = QMenu()
         act_show  = menu.addAction("Show"); act_show.triggered.connect(self.showNormal)
         act_settings = menu.addAction("Settings…"); act_settings.triggered.connect(self._open_settings)
@@ -971,8 +994,17 @@ class SettingsDialog(QDialog):
         form = QFormLayout(self)
 
         self.chk_quote = QCheckBox("Show 8:00 AM quote")
+        self.chk_startup = QCheckBox("Start with Windows (current user)")
+        self.chk_startup.setChecked(is_startup_enabled())
+        self.chk_minimize = QCheckBox("Minimize to tray on close")
+        self.chk_minimize.setChecked(bool(self.cfg.get("minimize_to_tray", False)))
+        self.chk_launchmin = QCheckBox("Launch minimized to tray")
+        self.chk_launchmin.setChecked(bool(self.cfg.get("launch_minimized", False)))
         self.chk_quote.setChecked(bool(self.cfg.get("auto_quote_8am", True)))
         form.addRow(self.chk_quote)
+        form.addRow(self.chk_startup)
+        form.addRow(self.chk_minimize)
+        form.addRow(self.chk_launchmin)
 
         self.spin_pct = QSpinBox(); self.spin_pct.setRange(1, 50)
         self.spin_pct.setValue(int(self.cfg.get("price_alert_pct", 3)))
@@ -1017,6 +1049,13 @@ class SettingsDialog(QDialog):
         self.cfg["legal_keywords"] = self.txt_legal.toPlainText().strip()
         self.cfg["openai_api_key"] = self.inp_openai.text().strip()
         self.cfg["newsapi_key"] = self.inp_news.text().strip()
+        self.cfg["minimize_to_tray"] = self.chk_minimize.isChecked()
+        self.cfg["launch_minimized"] = self.chk_launchmin.isChecked()
+        # Attempt to set startup only on Windows; ignore failure silently
+        try:
+            enable_startup(self.chk_startup.isChecked())
+        except Exception:
+            pass
         save_config(self.cfg)
         self.accept()
 
@@ -1116,3 +1155,20 @@ try:
         MainWindow._upload_last_pdf = __dc_stub_upload
 except Exception:
     pass
+
+
+    def closeEvent(self, event):
+        try:
+            if self.config.get("minimize_to_tray", False) and self.tray is not None and not self._headless():
+                event.ignore()
+                self.hide()
+                try:
+                    self.tray.showMessage("Running in background", "App is minimized to tray. Right-click tray icon to Quit.", QSystemTrayIcon.Information, 6000)
+                except Exception:
+                    pass
+                LOGGER.info("Window hidden to tray")
+                return
+        except Exception:
+            pass
+        LOGGER.info("Window closed")
+        super().closeEvent(event)
