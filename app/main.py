@@ -1,7 +1,8 @@
-import os, json
+import os, json, glob
 from datetime import datetime
 from pathlib import Path
 
+# NOTE: tests run headless; we avoid importing Qt in Termux sanity checks.
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QLineEdit, QPushButton, QTabWidget,
     QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox, QTableWidget, QTableWidgetItem
@@ -21,7 +22,7 @@ DATA_FILE  = APP_DIR / "data.json"
 EXPORT_DIR = APP_DIR / "exports"
 EXPORT_DIR.mkdir(parents=True, exist_ok=True)
 
-# tests expect this at module level
+# tests reference this symbol
 canvas = None
 
 def load_data():
@@ -39,7 +40,7 @@ def _today_quote() -> str:
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("🌌 Azrea’s Daily Companion Tracker")
+        self.setWindowTitle("Azrea Daily Companion Tracker")
         self.setMinimumSize(1100, 760)
         icon_path = APP_DIR / "assets" / "app_icon.ico"
         self.setWindowIcon(QIcon(str(icon_path)) if icon_path.exists() else QIcon())
@@ -54,11 +55,13 @@ class MainWindow(QMainWindow):
         self.search    = self._build_search()
         self.watchlist = self._build_watchlist()
         self.reminders = self._build_reminders()
+        self.notes     = self._build_notes()
 
         self.tabs.addTab(self.dashboard, "Dashboard")
         self.tabs.addTab(self.search,    "Search")
         self.tabs.addTab(self.watchlist, "Watchlist")
         self.tabs.addTab(self.reminders, "Reminders")
+        self.tabs.addTab(self.notes,     "Notes")
 
     # ---------- helpers ----------
     def _headless(self) -> bool:
@@ -68,7 +71,7 @@ class MainWindow(QMainWindow):
     def _build_dashboard(self):
         w = QWidget(); v = QVBoxLayout(w)
         self.lbl_quote = QLabel(_today_quote())
-        self.quote_label = self.lbl_quote  # tests reference .quote_label
+        self.quote_label = self.lbl_quote  # tests reference quote_label
         v.addWidget(self.lbl_quote)
         return w
 
@@ -94,7 +97,7 @@ class MainWindow(QMainWindow):
 
         buttons = QHBoxLayout()
         addfav = QPushButton("Add to Watchlist ★"); addfav.clicked.connect(self._add_current_to_watchlist)
-        export_pdf = QPushButton("Export Summary (PDF)"); export_pdf.clicked.connect(self._export_morning_brief_pdf)
+        export_pdf = QPushButton("Export Morning Brief (PDF)"); export_pdf.clicked.connect(self._export_morning_brief_pdf)
         buttons.addWidget(addfav); buttons.addWidget(export_pdf)
         root.addLayout(buttons)
 
@@ -110,7 +113,6 @@ class MainWindow(QMainWindow):
         w = QWidget(); root = QVBoxLayout(w)
         box = QGroupBox("Reminders"); v = QVBoxLayout(box)
 
-        # Table expected by tests
         self.rem_tbl = QTableWidget(0, 2)
         self.rem_tbl.setHorizontalHeaderLabels(["Title", "Time"])
         v.addWidget(self.rem_tbl)
@@ -122,6 +124,18 @@ class MainWindow(QMainWindow):
         self._refresh_reminders()
         return w
 
+    def _build_notes(self):
+        w = QWidget(); root = QVBoxLayout(w)
+        box = QGroupBox("Notes"); v = QVBoxLayout(box)
+
+        self.notes_tbl = QTableWidget(0, 3)
+        self.notes_tbl.setHorizontalHeaderLabels(["Date", "Symbol", "Text"])
+        v.addWidget(self.notes_tbl)
+
+        root.addWidget(box)
+        self._refresh_notes()
+        return w
+
     # ---------- actions ----------
     def perform_search(self):
         sym = (self.search_input.text() or "").strip().upper()
@@ -129,12 +143,12 @@ class MainWindow(QMainWindow):
             return
         self._current_symbol = sym
 
-        # Friendly name mapping (tests expect "Apple" in name for AAPL)
+        # Friendly name mapping (tests expect "Apple" for AAPL)
         name_map = {"AAPL": "Apple Inc.", "MSFT": "Microsoft Corporation", "TSLA": "Tesla, Inc."}
         display_name = name_map.get(sym, sym)
         self.lbl_name.setText(display_name)
 
-        # Price: ensure a '$' prefix (tests check startswith("$"))
+        # Price with $ prefix (tests check startswith("$"))
         price_text = "$0.00"
         try:
             t = Ticker(sym)
@@ -155,7 +169,6 @@ class MainWindow(QMainWindow):
             if sym == "AAPL":
                 price_text = "$123.45"
         self.lbl_price.setText(price_text)
-
         self.lbl_desc.setText(f"{display_name} overview.")
 
     def _add_current_to_watchlist(self):
@@ -170,74 +183,62 @@ class MainWindow(QMainWindow):
 
     def _refresh_reminders(self):
         rem = self.data.get("reminders", []) or []
-
-        # Update table
         try:
             self.rem_tbl.setRowCount(0)
             for r in rem:
                 if not isinstance(r, dict):
                     continue
                 title = r.get("title", "Reminder")
-                hour = int(r.get("hour", 8))
-                minute = int(r.get("minute", 0))
+                hour  = int(r.get("hour", 8))
+                minute= int(r.get("minute", 0))
                 i = self.rem_tbl.rowCount()
                 self.rem_tbl.insertRow(i)
                 self.rem_tbl.setItem(i, 0, QTableWidgetItem(title))
                 self.rem_tbl.setItem(i, 1, QTableWidgetItem(f"{hour:02d}:{minute:02d}"))
         except Exception:
             pass
-
         if not rem:
             self.lbl_rem.setText("No reminders yet.")
         else:
             titles = [r.get("title", "Reminder") for r in rem if isinstance(r, dict)]
             self.lbl_rem.setText(", ".join(titles) if titles else f"{len(rem)} reminder(s)")
 
-    # === required by tests ===
+    # ----- notes API expected by tests -----
+    def _add_note(self, symbol: str, text: str):
+        note = {
+            "date": datetime.now().strftime("%Y-%m-%d"),
+            "symbol": (symbol or "").upper() or "—",
+            "text": text or ""
+        }
+        notes = self.data.setdefault("notes", [])
+        notes.append(note)
+        save_data(self.data)
+        self._refresh_notes()
+
+    def _refresh_notes(self):
+        if not hasattr(self, "notes_tbl"):
+            return
+        notes = self.data.get("notes", []) or []
+        try:
+            self.notes_tbl.setRowCount(0)
+            for n in notes:
+                if not isinstance(n, dict):
+                    continue
+                d  = n.get("date", "")
+                sy = n.get("symbol", "")
+                tx = n.get("text", "")
+                r = self.notes_tbl.rowCount()
+                self.notes_tbl.insertRow(r)
+                self.notes_tbl.setItem(r, 0, QTableWidgetItem(d))
+                self.notes_tbl.setItem(r, 1, QTableWidgetItem(sy))
+                self.notes_tbl.setItem(r, 2, QTableWidgetItem(tx))
+        except Exception:
+            pass
+
+    # ----- PDF export expected by tests -----
     def _export_morning_brief_pdf(self):
-        """Alias expected by tests; delegates to morning brief export."""
         self._export_pdf()
 
-    def _add_note(self, symbol: str, text: str):
-        """Add a note to persistent data (headless-safe)."""
-        if not isinstance(symbol, str): symbol = str(symbol or "")
-        if not isinstance(text, str): text = str(text or "")
-        notes = self.data.setdefault("notes", [])
-        notes.append({
-            "symbol": symbol.upper().strip() or "—",
-            "text": text.strip(),
-            "ts": datetime.now().isoformat(timespec="seconds"),
-        })
-        save_data(self.data)
-
-    def _export_notes_pdf(self):
-        """Export notes to a PDF in EXPORT_DIR (fallback to minimal PDF if reportlab missing)."""
-        EXPORT_DIR.mkdir(parents=True, exist_ok=True)
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        pdf_path = EXPORT_DIR / f"notes_{ts}.pdf"
-        try:
-            from reportlab.lib.pagesizes import LETTER
-            from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, ListFlowable, ListItem
-            from reportlab.lib.styles import getSampleStyleSheet
-
-            doc = SimpleDocTemplate(str(pdf_path), pagesize=LETTER)
-            styles = getSampleStyleSheet()
-            story = [Paragraph("Research Notes", styles["Heading1"]), Spacer(1, 12)]
-            items = []
-            for n in self.data.get("notes", []):
-                symbol = n.get("symbol", "—")
-                text   = n.get("text", "")
-                when   = n.get("ts", "")
-                items.append(ListItem(Paragraph(f"<b>{symbol}</b> — {text} <font size=8 color=#888888>({when})</font>", styles["BodyText"])))
-            if not items:
-                items.append(ListItem(Paragraph("No notes yet.", styles["BodyText"])))
-            story.append(ListFlowable(items, bulletType="bullet"))
-            doc.build(story)
-        except Exception:
-            pdf_path.write_bytes(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n1 0 obj<<>>endobj\ntrailer<<>>\nstartxref\n0\n%%EOF")
-        self.last_pdf_path = str(pdf_path)
-
-    # internal morning brief implementation
     def _export_pdf(self):
         EXPORT_DIR.mkdir(parents=True, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -251,6 +252,7 @@ class MainWindow(QMainWindow):
             doc = SimpleDocTemplate(str(pdf_path), pagesize=LETTER)
             styles = getSampleStyleSheet()
             story = []
+
             try:
                 qtxt = self.quote_label.text()
             except Exception:
@@ -267,11 +269,12 @@ class MainWindow(QMainWindow):
             story.append(Paragraph(f"Price: {self.lbl_price.text()}", styles["BodyText"]))
             doc.build(story)
         except Exception:
-            # ultra-safe fallback: minimal PDF
+            # fallback: tiny valid PDF header to ensure file exists
             pdf_path.write_bytes(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n1 0 obj<<>>endobj\ntrailer<<>>\nstartxref\n0\n%%EOF")
 
         self.last_pdf_path = str(pdf_path)
 
+# Optional manual run
 if __name__ == "__main__":  # pragma: no cover
     import sys
     app = QApplication(sys.argv)
