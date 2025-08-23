@@ -95,7 +95,8 @@ def load_data():
         "last_prices": {},
         "last_news_check": 0,
         "last_update_check": 0,
-        "reminders": []  # [{title, hour, minute, days:[0-6], enabled}]
+        "reminders": [],  # [{title, hour, minute, days:[0-6], enabled}]
+        "notes": []  # [{ts, symbol, text}]
     }
 
 def save_data(data):
@@ -213,6 +214,7 @@ class MainWindow(QMainWindow):
         self.search    = self._build_search()
         self.watchlist = self._build_watchlist()
         self.reminders = self._build_reminders()
+        self.notes = self._build_notes()
         self.ai        = self._build_ai_tab()
         if get_company_intel:
             self.intel = self._build_intel_tab()
@@ -222,6 +224,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.search,    "🔍 Search")
         self.tabs.addTab(self.watchlist, "⭐ Watchlist")
         self.tabs.addTab(self.reminders, "⏰ Reminders")
+        self.tabs.addTab(self.notes, "🗒️ Notes")
         self.tabs.addTab(self.ai,        "🤖 AI Assistant")
 
         self._init_tray()
@@ -984,6 +987,85 @@ class MainWindow(QMainWindow):
             self.data["last_update_check"] = int(time.time()); save_data(self.data)
 
 # --------- Settings Dialog (at bottom to keep file compact) ---------
+
+# ---------- Notes ----------
+def _build_notes(self):
+    w = QWidget(); root = QVBoxLayout(w); root.setContentsMargins(16,16,16,16)
+    box = QGroupBox("Company Notes"); v = QVBoxLayout(box)
+
+    row = QHBoxLayout()
+    self.note_symbol_input = QLineEdit(); self.note_symbol_input.setPlaceholderText("Ticker (e.g., AAPL)")
+    self.note_text_input = QTextEdit(); self.note_text_input.setPlaceholderText("Write a short note about this company…")
+    self.note_text_input.setMinimumHeight(100)
+    add = QPushButton("Save Note"); add.clicked.connect(self._add_note)
+    row.addWidget(self.note_symbol_input); row.addWidget(add)
+
+    self.notes_tbl = QTableWidget(0, 3)
+    self.notes_tbl.setHorizontalHeaderLabels(["Time", "Symbol", "Note"])
+    self.notes_tbl.horizontalHeader().setStretchLastSection(True)
+
+    btns = QHBoxLayout()
+    exp = QPushButton("Export Notes CSV"); exp.clicked.connect(self._export_notes_csv)
+    btns.addWidget(exp)
+
+    v.addLayout(row)
+    v.addWidget(self.note_text_input)
+    v.addWidget(self.notes_tbl)
+    v.addLayout(btns)
+    root.addWidget(box)
+    self._refresh_notes()
+    return w
+
+def _add_note(self, symbol=None, text=None):
+    sym = (symbol or self.note_symbol_input.text()).strip().upper()
+    txt = (text or self.note_text_input.toPlainText()).strip()
+    if not sym:
+        self._info("Notes", "Enter a ticker (e.g., AAPL)."); return
+    if not txt:
+        self._info("Notes", "Write something in the note text."); return
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    self.data.setdefault("notes", []).append({"ts": now, "symbol": sym, "text": txt})
+    save_data(self.data)
+    self._refresh_notes()
+    try:
+        self.note_text_input.clear()
+    except Exception:
+        pass
+    try:
+        LOGGER.info(f"Note saved for {sym}")
+    except Exception:
+        pass
+    self._info("Notes", "Saved.")
+
+def _refresh_notes(self):
+    notes = self.data.get("notes", [])
+    self.notes_tbl.setRowCount(0)
+    # Show latest first
+    for n in reversed(notes[-200:]):
+        row = self.notes_tbl.rowCount(); self.notes_tbl.insertRow(row)
+        self.notes_tbl.setItem(row, 0, QTableWidgetItem(n.get("ts","—")))
+        self.notes_tbl.setItem(row, 1, QTableWidgetItem(n.get("symbol","—")))
+        # Show a compact preview; full text is in data.json
+        preview = n.get("text","").replace("\n"," ")
+        if len(preview) > 120: preview = preview[:117] + "..."
+        self.notes_tbl.setItem(row, 2, QTableWidgetItem(preview))
+
+def _export_notes_csv(self):
+    path, _ = QFileDialog.getSaveFileName(self, "Export Notes CSV", str(ROOT_DIR / "notes.csv"), "CSV Files (*.csv)")
+    if not path: return
+    try:
+        import csv
+        with open(path, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["ts","symbol","text"])
+            for n in self.data.get("notes", []):
+                w.writerow([n.get("ts",""), n.get("symbol",""), n.get("text","")])
+        self._info("Export", f"Saved: {path}")
+        try: LOGGER.info(f"Notes CSV exported: {path}")
+        except Exception: pass
+    except Exception as e:
+        self._warn("Export", f"Failed to export notes:\n{e}")
+
 class SettingsDialog(QDialog):
     def __init__(self, cfg: dict, parent=None):
         super().__init__(parent)
