@@ -205,6 +205,10 @@ class MainWindow(QMainWindow):
             self.setWindowIcon(QIcon())
 
         self.data = load_data()
+        if "notes" not in self.data:
+            self.data["notes"] = []
+            try: save_data(self.data)
+            except Exception: pass
         # migrate: ensure notes list exists
         if "notes" not in self.data:
             self.data["notes"] = []
@@ -216,13 +220,13 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.tabs)
 
         self.dashboard = self._build_dashboard()
-        self.search    = self._build_search()
+        self.search = self._build_search()
         self.watchlist = self._build_watchlist()
         self.reminders = self._build_reminders()
         
         self.notes = self._build_notes()
 self.notes = self._build_notes()
-        self.ai        = self._build_ai_tab()
+        self.ai = self._build_ai_tab()
         if get_company_intel:
             self.intel = self._build_intel_tab()
             self.tabs.addTab(self.intel, "🏢 Company Intel")
@@ -1263,3 +1267,90 @@ except Exception:
             pass
         LOGGER.info("Window closed")
         super().closeEvent(event)
+
+
+# === NOTES EXT HELPERS BIND ===
+def _notes_build_ext(self):
+    w = QWidget(); root = QVBoxLayout(w); root.setContentsMargins(16,16,16,16)
+    box = QGroupBox("Company Notes"); v = QVBoxLayout(box)
+
+    row = QHBoxLayout()
+    self.note_symbol_input = QLineEdit(); self.note_symbol_input.setPlaceholderText("Ticker (e.g., AAPL)")
+    self.note_text_input = QTextEdit(); self.note_text_input.setPlaceholderText("Write a short note about this company…")
+    self.note_text_input.setMinimumHeight(100)
+    add = QPushButton("Save Note"); add.clicked.connect(self._add_note_ext)
+    row.addWidget(self.note_symbol_input); row.addWidget(add)
+
+    self.notes_tbl = QTableWidget(0, 3)
+    self.notes_tbl.setHorizontalHeaderLabels(["Time", "Symbol", "Note"])
+    self.notes_tbl.horizontalHeader().setStretchLastSection(True)
+
+    btns = QHBoxLayout()
+    exp = QPushButton("Export Notes CSV"); exp.clicked.connect(self._export_notes_csv_ext)
+    btns.addWidget(exp)
+
+    v.addLayout(row)
+    v.addWidget(self.note_text_input)
+    v.addWidget(self.notes_tbl)
+    v.addLayout(btns)
+    root.addWidget(box)
+    self._refresh_notes_ext()
+    return w
+
+def _add_note_ext(self, symbol=None, text=None):
+    sym = (symbol or self.note_symbol_input.text()).strip().upper()
+    txt = (text or self.note_text_input.toPlainText()).strip()
+    if not sym:
+        self._info("Notes", "Enter a ticker (e.g., AAPL)."); return
+    if not txt:
+        self._info("Notes", "Write something in the note text."); return
+    import datetime
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    self.data.setdefault("notes", []).append({"ts": now, "symbol": sym, "text": txt})
+    save_data(self.data)
+    self._refresh_notes_ext()
+    try:
+        self.note_text_input.clear()
+    except Exception:
+        pass
+    try:
+        LOGGER.info(f"Note saved for {sym}")
+    except Exception:
+        pass
+    self._info("Notes", "Saved.")
+
+def _refresh_notes_ext(self):
+    notes = self.data.get("notes", [])
+    self.notes_tbl.setRowCount(0)
+    for n in reversed(notes[-200:]):
+        row = self.notes_tbl.rowCount(); self.notes_tbl.insertRow(row)
+        self.notes_tbl.setItem(row, 0, QTableWidgetItem(n.get("ts","—")))
+        self.notes_tbl.setItem(row, 1, QTableWidgetItem(n.get("symbol","—")))
+        preview = (n.get("text","") or "").replace("\n"," ")
+        if len(preview) > 120: preview = preview[:117] + "..."
+        self.notes_tbl.setItem(row, 2, QTableWidgetItem(preview))
+
+def _export_notes_csv_ext(self):
+    path, _ = QFileDialog.getSaveFileName(self, "Export Notes CSV", str(ROOT_DIR / "notes.csv"), "CSV Files (*.csv)")
+    if not path: return
+    try:
+        import csv
+        with open(path, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["ts","symbol","text"])
+            for n in self.data.get("notes", []):
+                w.writerow([n.get("ts",""), n.get("symbol",""), n.get("text","")])
+        self._info("Export", f"Saved: {path}")
+        try: LOGGER.info(f"Notes CSV exported: {path}")
+        except Exception: pass
+    except Exception as e:
+        self._warn("Export", f"Failed to export notes:\n{e}")
+
+# Attach to MainWindow after class definition is loaded
+try:
+    MainWindow._build_notes = _notes_build_ext
+    MainWindow._add_note = _add_note_ext
+    MainWindow._refresh_notes = _refresh_notes_ext
+    MainWindow._export_notes_csv = _export_notes_csv_ext
+except Exception:
+    pass
