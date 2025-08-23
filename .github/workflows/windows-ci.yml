@@ -1,0 +1,68 @@
+name: Windows CI
+
+on:
+  push:
+    branches: [ "main", "testing/**" ]
+  pull_request:
+    branches: [ "main", "testing/**" ]
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install deps and prep logs dir
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          New-Item -ItemType Directory -Force -Path build\logs | Out-Null
+
+      - name: Compile all Python files (fast fail on syntax)
+        shell: pwsh
+        run: |
+          python - <<'PY'
+          import py_compile, sys, pathlib
+          root = pathlib.Path(".")
+          files = [*root.rglob("app/**/*.py"), *root.rglob("tests/**/*.py")]
+          ok = True
+          for p in files:
+            try:
+              py_compile.compile(str(p), doraise=True)
+            except Exception as e:
+              ok = False
+              print(f"SYNTAX ERROR in {p}:\n{e}\n", flush=True)
+          sys.exit(0 if ok else 1)
+          PY
+
+      - name: Run pytest (tee to file)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          pytest -q 2>&1 | Tee-Object -FilePath build\logs\pytest.log
+          $code = $LASTEXITCODE
+          Write-Host "---- tail pytest.log ----"
+          if (Test-Path build\logs\pytest.log) {
+            Get-Content build\logs\pytest.log -Tail 200
+          } else {
+            Write-Host "(pytest.log missing)"
+          }
+          exit $code
+
+      - name: Upload logs (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-logs
+          path: |
+            build/logs/pytest.log
+            build/**/*.log
+            **/*.log
+          if-no-files-found: warn
