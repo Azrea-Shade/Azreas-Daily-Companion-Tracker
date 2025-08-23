@@ -6,8 +6,10 @@ from pathlib import Path
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QLineEdit, QPushButton, QTabWidget,
     QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox, QTableWidget, QTableWidgetItem
-)
+, QMessageBox)
+
 from PyQt5.QtGui import QIcon
+from PyQt5.QtCore import QTimer
 
 try:
     from yahooquery import Ticker
@@ -21,6 +23,17 @@ APP_DIR    = Path(__file__).resolve().parent
 DATA_FILE  = APP_DIR / "data.json"
 EXPORT_DIR = APP_DIR / "exports"
 EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+CONFIG_FILE = APP_DIR / "config.json"
+
+def load_config():
+    try:
+        return json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {"accessible": False, "telemetry": False}
+
+def save_config(cfg: dict):
+    CONFIG_FILE.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+
 
 # tests reference this symbol
 canvas = None
@@ -50,6 +63,21 @@ class MainWindow(QMainWindow):
 
         self.tabs = QTabWidget()
         self.setCentralWidget(self.tabs)
+        # Settings/config + Menus + timers (timers only in non-headless)
+        try:
+            self.config = load_config()
+        except Exception:
+            self.config = {"accessible": False, "telemetry": False}
+        try:
+            self._build_menu()
+        except Exception:
+            pass
+        if not self._headless():
+            try:
+                self._start_background_timers()
+            except Exception:
+                pass
+
 
         self.dashboard = self._build_dashboard()
         self.search    = self._build_search()
@@ -241,6 +269,17 @@ class MainWindow(QMainWindow):
 
     def _export_pdf(self):
         EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+CONFIG_FILE = APP_DIR / "config.json"
+
+def load_config():
+    try:
+        return json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {"accessible": False, "telemetry": False}
+
+def save_config(cfg: dict):
+    CONFIG_FILE.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         pdf_path = EXPORT_DIR / f"morning_brief_{ts}.pdf"
 
@@ -275,6 +314,91 @@ class MainWindow(QMainWindow):
         self.last_pdf_path = str(pdf_path)
 
 # Optional manual run
+    # ---------- menus & helpers ----------
+    def _build_menu(self):
+        mb = self.menuBar()
+        tools = mb.addMenu("Tools")
+        a_chat = tools.addAction("AI Chat…")
+        a_chat.triggered.connect(self._open_ai_chat)
+        a_update = tools.addAction("Check for Updates")
+        a_update.triggered.connect(self._check_updates)
+
+        settings = mb.addMenu("Settings")
+        a_access = settings.addAction("Accessible Mode")
+        a_access.setCheckable(True)
+        a_access.setChecked(bool(getattr(self, "config", {}).get("accessible")))
+        a_access.toggled.connect(self._toggle_accessible)
+
+        a_tele = settings.addAction("Opt-in Diagnostics")
+        a_tele.setCheckable(True)
+        a_tele.setChecked(bool(getattr(self, "config", {}).get("telemetry")))
+        a_tele.toggled.connect(self._toggle_telemetry)
+
+        helpm = mb.addMenu("Help")
+        a_about = helpm.addAction("About")
+        a_about.triggered.connect(lambda: QMessageBox.information(self, "About",
+            "Azrea’s Daily Companion Tracker\nFuturistic, accessible companion for research & productivity."))
+
+    def _open_ai_chat(self):
+        # Open dialog only if GUI is shown; in CI (headless) this won't be called.
+        try:
+            from .ai import ChatDialog
+            dlg = ChatDialog(self)
+            if not self._headless():
+                dlg.exec_()
+        except Exception:
+            # Keep failure silent in headless / missing Qt plug-ins
+            pass
+
+    def _toggle_accessible(self, on: bool):
+        try:
+            self.config["accessible"] = bool(on)
+            save_config(self.config)
+        except Exception:
+            pass
+        # Simple larger font / high-contrast tweak
+        if on:
+            self.setStyleSheet("QWidget { font-size: 12.5pt; } QLabel { font-weight: 600; }")
+        else:
+            self.setStyleSheet("")
+
+    def _toggle_telemetry(self, on: bool):
+        try:
+            self.config["telemetry"] = bool(on)
+            save_config(self.config)
+        except Exception:
+            pass
+
+    def _check_updates(self):
+        try:
+            from .updater import check_latest_release
+            info = check_latest_release()
+            if info:
+                msg = f"Latest: {info.get('tag')}\nName: {info.get('name')}\nPublished: {info.get('published_at')}"
+            else:
+                msg = "Could not check releases right now."
+            if not self._headless():
+                QMessageBox.information(self, "Updates", msg)
+        except Exception:
+            pass
+
+    def _start_background_timers(self):
+        # Start a gentle timer for watchlist/news checks. Only in non-headless runs.
+        try:
+            from .background import safe_check_watchlist_changes
+        except Exception:
+            return
+        self._bg_timer = QTimer(self)
+        self._bg_timer.setInterval(15 * 60 * 1000)  # 15 min
+        def tick():
+            try:
+                _ = safe_check_watchlist_changes(self.data.get("watchlist", []))
+                # (future) show tray notifications here
+            except Exception:
+                pass
+        self._bg_timer.timeout.connect(tick)
+        self._bg_timer.start()
+
 if __name__ == "__main__":  # pragma: no cover
     import sys
     app = QApplication(sys.argv)
