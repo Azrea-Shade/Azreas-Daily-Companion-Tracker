@@ -205,6 +205,11 @@ class MainWindow(QMainWindow):
             self.setWindowIcon(QIcon())
 
         self.data = load_data()
+        # migrate: ensure notes list exists
+        if "notes" not in self.data:
+            self.data["notes"] = []
+            try: save_data(self.data)
+            except Exception: pass
         self.config = load_config()
 
         self.tabs = QTabWidget()
@@ -214,7 +219,9 @@ class MainWindow(QMainWindow):
         self.search    = self._build_search()
         self.watchlist = self._build_watchlist()
         self.reminders = self._build_reminders()
+        
         self.notes = self._build_notes()
+self.notes = self._build_notes()
         self.ai        = self._build_ai_tab()
         if get_company_intel:
             self.intel = self._build_intel_tab()
@@ -224,7 +231,9 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.search,    "🔍 Search")
         self.tabs.addTab(self.watchlist, "⭐ Watchlist")
         self.tabs.addTab(self.reminders, "⏰ Reminders")
+        
         self.tabs.addTab(self.notes, "🗒️ Notes")
+self.tabs.addTab(self.notes, "🗒️ Notes")
         self.tabs.addTab(self.ai,        "🤖 AI Assistant")
 
         self._init_tray()
