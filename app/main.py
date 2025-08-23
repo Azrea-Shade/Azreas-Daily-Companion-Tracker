@@ -282,3 +282,10 @@ if __name__ == "__main__":  # pragma: no cover
     if not w._headless():
         w.show()
     sys.exit(app.exec_())
+
+# --- plugin hook (non-fatal) ---
+try:
+    from . import plugins as _plugins
+    _plugins.install_into(globals())
+except Exception:
+    pass

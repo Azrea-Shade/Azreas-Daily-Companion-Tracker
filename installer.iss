@@ -25,3 +25,12 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 Filename: "{tmp}\vcredist_x64.exe"; Parameters: "/quiet /norestart"; Flags: waituntilterminated skipifdoesntexist
 ; Launch app after install
 Filename: "{app}\DailyCompanion.exe"; Description: "Launch Daily Companion"; Flags: nowait postinstall skipifsilent
+
+; -- Added by automation: Startup task
+[Tasks]
+Name: "startupicon"; Description: "Start at Windows login"; GroupDescription: "Startup:"; Flags: unchecked
+
+[Registry]
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; \
+    ValueType: string; ValueName: "AzreaCompanion"; \
+    ValueData: """{app}\AzreaCompanion.exe"""; Tasks: startupicon

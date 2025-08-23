@@ -9,3 +9,4 @@ pydrive2
 packaging
 pytest
 pytest-mock
+win10toast==0.9
