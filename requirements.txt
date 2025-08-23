@@ -10,3 +10,5 @@ packaging
 pytest
 pytest-mock
 win10toast==0.9
+feedparser
+python-dotenv

@@ -1,69 +1,123 @@
-import os, time, threading, json
-from datetime import datetime
+import os, time, threading
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import Callable, Dict, Any, List
 
-import requests
+from . import providers as P
 
-# Simple NewsAPI fetcher (feature 1)
-def fetch_company_news(api_key: str, query: str, page_size: int = 10) -> List[Dict[str, Any]]:
-    if not api_key:
-        return []
+DATA_PATH = Path(__file__).resolve().parent / "data.json"
+
+def _load():
+    import json
     try:
-        url = "https://newsapi.org/v2/everything"
-        params = {"q": query, "language": "en", "sortBy": "publishedAt", "pageSize": page_size, "apiKey": api_key}
-        r = requests.get(url, params=params, timeout=10)
-        r.raise_for_status()
-        data = r.json()
-        return data.get("articles", []) or []
+        return json.loads(DATA_PATH.read_text(encoding="utf-8"))
     except Exception:
-        return []
+        return {"watchlist":[], "reminders":[], "alerts":[]}
 
-# SEC recent filings by CIK (feature 1)
-def fetch_recent_sec_filings(cik: str, limit: int = 10) -> List[Dict[str, Any]]:
-    if not cik:
-        return []
-    try:
-        cik_norm = str(cik).zfill(10)
-        url = f"https://data.sec.gov/submissions/CIK{cik_norm}.json"
-        headers = {"User-Agent": "AzreaDailyCompanion/1.0 (admin@example.com)"}
-        r = requests.get(url, headers=headers, timeout=12)
-        r.raise_for_status()
-        j = r.json()
-        forms = j.get("filings", {}).get("recent", {})
+def _save(d):
+    import json
+    DATA_PATH.write_text(json.dumps(d, indent=2), encoding="utf-8")
+
+class AlertsManager:
+    """
+    Holds alert rules and evaluates them on tick().
+    Notifies via a callback: notify(title:str, message:str).
+    """
+    def __init__(self, notify:Callable[[str,str],None], data:Dict[str,Any]=None):
+        self.notify = notify
+        self.data = data if data is not None else _load()
+        self._last_news_seen = set()  # naive dedupe
+
+    # ---- CRUD ----
+    def add_price_alert(self, symbol:str, above:float=None, below:float=None):
+        a = {"type":"price","symbol":symbol.upper(),"above":above,"below":below,"enabled":True}
+        self.data.setdefault("alerts",[]).append(a); _save(self.data); return a
+
+    def add_keyword_alert(self, keywords:List[str]):
+        a = {"type":"keyword","keywords":[k.strip() for k in keywords if k.strip()],"enabled":True}
+        self.data.setdefault("alerts",[]).append(a); _save(self.data); return a
+
+    def add_legal_alert(self, symbol:str):
+        a = {"type":"legal","symbol":symbol.upper(),"enabled":True}
+        self.data.setdefault("alerts",[]).append(a); _save(self.data); return a
+
+    def to_table(self):
         out = []
-        for i, form in enumerate(forms.get("form", [])[:limit]):
-            out.append({
-                "form": form,
-                "date": (forms.get("filingDate", [""]*9999)[:limit] + [""])[i],
-                "desc": (forms.get("primaryDocDescription", [""]*9999)[:limit] + [""])[i],
-            })
+        for a in self.data.get("alerts",[]):
+            if a.get("type")=="price":
+                cond = []
+                if a.get("above") is not None: cond.append(f"> {a['above']}")
+                if a.get("below") is not None: cond.append(f"< {a['below']}")
+                out.append([a.get("type"), a.get("symbol"), " & ".join(cond)])
+            elif a.get("type")=="keyword":
+                out.append([a.get("type"), "-", ", ".join(a.get("keywords",[]))])
+            elif a.get("type")=="legal":
+                out.append([a.get("type"), a.get("symbol"), "SEC Filings"])
         return out
-    except Exception:
-        return []
 
-# Background watcher skeleton (feature 1 + 5)
-class Watcher:
-    def __init__(self, owner, poll_seconds=300):
-        self.owner = owner
-        self.poll_seconds = poll_seconds
-        self._stop = False
-        self._th = None
+    # ---- evaluation ----
+    def _tick_price(self):
+        for a in self.data.get("alerts",[]):
+            if a.get("type") != "price" or not a.get("enabled"): continue
+            sym = a.get("symbol","").upper()
+            if not sym: continue
+            px = P.get_price(sym)
+            if px is None: continue
+            above = a.get("above"); below = a.get("below")
+            if (above is not None and px > float(above)) or (below is not None and px < float(below)):
+                self.notify("Price Alert", f"{sym} hit ${px:.2f} (rule: {('> '+str(above)) if above is not None else ''} {('< '+str(below)) if below is not None else ''})")
 
-    def start(self):
-        if self._th or self.owner._headless() or os.environ.get("CI"):
-            return
-        self._th = threading.Thread(target=self._run, daemon=True)
-        self._th.start()
+    def _tick_legal(self):
+        for a in self.data.get("alerts",[]):
+            if a.get("type") != "legal" or not a.get("enabled"): continue
+            sym = a.get("symbol","").upper()
+            mp = P.sec_map_for_ticker(sym)
+            if not mp: continue
+            filings = P.get_recent_filings(mp.get("cik_str"))
+            for f in filings[:3]:
+                key = f"{sym}:{f.get('form')}:{f.get('filingDate')}"
+                if key in self._last_news_seen: continue
+                self._last_news_seen.add(key)
+                self.notify("SEC Filing", f"{sym} {f.get('form')} on {f.get('filingDate')} — {f.get('description','')}")
 
-    def stop(self):
-        self._stop = True
+    def _tick_news(self):
+        # RSS first (free)
+        items = P.fetch_rss_items(limit=25)
+        for it in items:
+            head = (it.get("title") or "")[:200]
+            if not head: continue
+            # keyword rules
+            for a in self.data.get("alerts",[]):
+                if a.get("type") != "keyword" or not a.get("enabled"): continue
+                if P.headline_matches_keywords(head, a.get("keywords",[])):
+                    key = "rss:" + head
+                    if key in self._last_news_seen: continue
+                    self._last_news_seen.add(key)
+                    self.notify("News (keyword)", head)
 
-    def _run(self):
-        while not self._stop:
-            try:
-                self.owner._check_price_alerts()
-                self.owner._maybe_refresh_alert_feed()
-            except Exception:
-                pass
-            time.sleep(self.poll_seconds)
+            # buyout detection from RSS
+            if P.headline_matches_buyout(head):
+                key = "buyout:" + head
+                if key in self._last_news_seen: continue
+                self._last_news_seen.add(key)
+                self.notify("M&A / Buyout", head)
+
+        # Optional: NewsAPI and Finnhub (if keys present)
+        if P.NEWSAPI_KEY:
+            arts = P.newsapi_search("merger OR acquisition OR buyout", limit=20)
+            for a in arts:
+                head = (a.get("title") or "")[:200]
+                if not head: continue
+                key = "newsapi:" + head
+                if key in self._last_news_seen: continue
+                self._last_news_seen.add(key)
+                if P.headline_matches_buyout(head):
+                    self.notify("M&A (NewsAPI)", head)
+
+    def tick(self):
+        # call in GUI timer or background thread
+        try: self._tick_price()
+        except Exception: pass
+        try: self._tick_legal()
+        except Exception: pass
+        try: self._tick_news()
+        except Exception: pass

@@ -5,7 +5,7 @@ from pathlib import Path
 # NOTE: tests run headless; we avoid importing Qt in Termux sanity checks.
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QLineEdit, QPushButton, QTabWidget,
-    QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox, QTableWidget, QTableWidgetItem
+    QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox, QTableWidget, QTableWidgetItem, QSystemTrayIcon
 , QMessageBox)
 
 from PyQt5.QtGui import QIcon
@@ -90,6 +90,14 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.watchlist, "Watchlist")
         self.tabs.addTab(self.reminders, "Reminders")
         self.tabs.addTab(self.notes,     "Notes")
+        try:
+            from .alerts import AlertsManager
+            self.alerts_mgr = AlertsManager(self._notify, self.data)
+            self.alerts_tab = self._build_alerts_tab()
+            self.tabs.addTab(self.alerts_tab, "Alerts")
+            self._init_alerts_runtime()
+        except Exception:
+            pass
 
     # ---------- helpers ----------
     def _headless(self) -> bool:
@@ -411,5 +419,129 @@ if __name__ == "__main__":  # pragma: no cover
 try:
     from . import plugins as _plugins
     _plugins.install_into(globals())
+except Exception:
+    pass
+
+
+# --- Alerts integration (methods defined after class; bound below) ---
+try:
+    from .alerts import AlertsManager  # noqa
+except Exception:  # pragma: no cover
+    class AlertsManager:
+        def __init__(self, *a, **k): pass
+        def to_table(self): return []
+        def tick(self): return []
+
+def _mw_build_alerts_tab(self):
+    # Build a tiny Alerts tab: add rules and show table of rules
+    from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QTableWidget, QTableWidgetItem, QGroupBox
+    w = QWidget(); root = QVBoxLayout(w)
+
+    # Price rule
+    box = QGroupBox("Add Price Alert"); v = QHBoxLayout(box)
+    self.alert_sym = QLineEdit(); self.alert_sym.setPlaceholderText("Symbol (e.g., AAPL)")
+    self.alert_above = QLineEdit(); self.alert_above.setPlaceholderText("Above $ (optional)")
+    self.alert_below = QLineEdit(); self.alert_below.setPlaceholderText("Below $ (optional)")
+    btn_add = QPushButton("Add"); 
+    def _add_price():
+        try:
+            sym = (self.alert_sym.text() or "").upper().strip()
+            ab  = float(self.alert_above.text()) if self.alert_above.text() else None
+            bl  = float(self.alert_below.text()) if self.alert_below.text() else None
+            if sym:
+                self.alerts_mgr.add_price_alert(sym, ab, bl)
+                _refresh_table()
+        except Exception:
+            pass
+    btn_add.clicked.connect(_add_price)
+    for wdg in (self.alert_sym, self.alert_above, self.alert_below, btn_add):
+        v.addWidget(wdg)
+    root.addWidget(box)
+
+    # Keyword rule
+    box2 = QGroupBox("Add Keyword Alert"); v2 = QHBoxLayout(box2)
+    self.alert_kw = QLineEdit(); self.alert_kw.setPlaceholderText("Comma-separated keywords (e.g., merger,buyout)")
+    btn_kw = QPushButton("Add")
+    def _add_kw():
+        kws = [x.strip() for x in (self.alert_kw.text() or "").split(",") if x.strip()]
+        if kws:
+            self.alerts_mgr.add_keyword_alert(kws)
+            _refresh_table()
+    btn_kw.clicked.connect(_add_kw)
+    for wdg in (self.alert_kw, btn_kw):
+        v2.addWidget(wdg)
+    root.addWidget(box2)
+
+    # Legal rule
+    box3 = QGroupBox("Add Legal/Filings Alert"); v3 = QHBoxLayout(box3)
+    self.alert_legal_sym = QLineEdit(); self.alert_legal_sym.setPlaceholderText("Symbol (e.g., AAPL)")
+    btn_l = QPushButton("Add")
+    def _add_leg():
+        sym = (self.alert_legal_sym.text() or "").upper().strip()
+        if sym:
+            self.alerts_mgr.add_legal_alert(sym)
+            _refresh_table()
+    btn_l.clicked.connect(_add_leg)
+    for wdg in (self.alert_legal_sym, btn_l):
+        v3.addWidget(wdg)
+    root.addWidget(box3)
+
+    # Table of rules
+    self.alerts_tbl = QTableWidget(0,3)
+    self.alerts_tbl.setHorizontalHeaderLabels(["Type","Symbol","Rule/Keywords"])
+    root.addWidget(self.alerts_tbl)
+
+    def _refresh_table():
+        rules = self.alerts_mgr.to_table()
+        self.alerts_tbl.setRowCount(0)
+        for r in rules:
+            i = self.alerts_tbl.rowCount()
+            self.alerts_tbl.insertRow(i)
+            for j,val in enumerate(r):
+                self.alerts_tbl.setItem(i, j, QTableWidgetItem(str(val)))
+
+    _refresh_table()
+    return w
+
+def _mw_init_alerts_runtime(self):
+    import os
+    # Only run when not headless and explicitly enabled
+    if getattr(self, "_headless", None) and self._headless(): 
+        return
+    if os.getenv("ENABLE_ALERTS","0") not in ("1","true","yes","on"):
+        return
+    # System tray for notifications (if available)
+    try:
+        if not hasattr(self, "tray"):
+            self.tray = QSystemTrayIcon(self.windowIcon(), self)
+            self.tray.setVisible(True)
+    except Exception:
+        pass
+    # Background timer (60s)
+    try:
+        self._alerts_timer = QTimer(self)
+        self._alerts_timer.setInterval(60_000)
+        self._alerts_timer.timeout.connect(lambda: self.alerts_mgr.tick())
+        self._alerts_timer.start()
+    except Exception:
+        pass
+
+def _mw_notify(self, title:str, message:str):
+    try:
+        if hasattr(self, "tray") and self.tray:
+            self.tray.showMessage(title, message, QSystemTrayIcon.Information, 5000)
+            return
+    except Exception:
+        pass
+    try:
+        print(f"[ALERT] {title}: {message}")
+    except Exception:
+        pass
+
+# Bind into class
+try:
+    MainWindow._build_alerts_tab = _mw_build_alerts_tab
+    MainWindow._init_alerts_runtime = _mw_init_alerts_runtime
+    MainWindow._notify = _mw_notify
 except Exception:
     pass
