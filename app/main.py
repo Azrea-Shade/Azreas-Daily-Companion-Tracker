@@ -2,14 +2,14 @@ import os, json, glob
 from datetime import datetime
 from pathlib import Path
 
-# NOTE: tests run headless; we avoid importing Qt in Termux sanity checks.
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QLineEdit, QPushButton, QTabWidget,
-    QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox, QTableWidget, QTableWidgetItem, QSystemTrayIcon
-, QMessageBox)
-
+    QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox, QTableWidget, QTableWidgetItem
+)
 from PyQt5.QtGui import QIcon
-from PyQt5.QtCore import QTimer
+
+# Place services import AFTER PyQt imports (Termux-safe parsing)
+from app import services as s
 
 try:
     from yahooquery import Ticker
@@ -23,17 +23,6 @@ APP_DIR    = Path(__file__).resolve().parent
 DATA_FILE  = APP_DIR / "data.json"
 EXPORT_DIR = APP_DIR / "exports"
 EXPORT_DIR.mkdir(parents=True, exist_ok=True)
-CONFIG_FILE = APP_DIR / "config.json"
-
-def load_config():
-    try:
-        return json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return {"accessible": False, "telemetry": False}
-
-def save_config(cfg: dict):
-    CONFIG_FILE.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
-
 
 # tests reference this symbol
 canvas = None
@@ -53,7 +42,7 @@ def _today_quote() -> str:
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Azrea Daily Companion Tracker")
+        self.setWindowTitle("🌌 Azrea’s Daily Companion Tracker")
         self.setMinimumSize(1100, 760)
         icon_path = APP_DIR / "assets" / "app_icon.ico"
         self.setWindowIcon(QIcon(str(icon_path)) if icon_path.exists() else QIcon())
@@ -63,21 +52,6 @@ class MainWindow(QMainWindow):
 
         self.tabs = QTabWidget()
         self.setCentralWidget(self.tabs)
-        # Settings/config + Menus + timers (timers only in non-headless)
-        try:
-            self.config = load_config()
-        except Exception:
-            self.config = {"accessible": False, "telemetry": False}
-        try:
-            self._build_menu()
-        except Exception:
-            pass
-        if not self._headless():
-            try:
-                self._start_background_timers()
-            except Exception:
-                pass
-
 
         self.dashboard = self._build_dashboard()
         self.search    = self._build_search()
@@ -90,14 +64,6 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.watchlist, "Watchlist")
         self.tabs.addTab(self.reminders, "Reminders")
         self.tabs.addTab(self.notes,     "Notes")
-        try:
-            from .alerts import AlertsManager
-            self.alerts_mgr = AlertsManager(self._notify, self.data)
-            self.alerts_tab = self._build_alerts_tab()
-            self.tabs.addTab(self.alerts_tab, "Alerts")
-            self._init_alerts_runtime()
-        except Exception:
-            pass
 
     # ---------- helpers ----------
     def _headless(self) -> bool:
@@ -107,7 +73,7 @@ class MainWindow(QMainWindow):
     def _build_dashboard(self):
         w = QWidget(); v = QVBoxLayout(w)
         self.lbl_quote = QLabel(_today_quote())
-        self.quote_label = self.lbl_quote  # tests reference quote_label
+        self.quote_label = self.lbl_quote  # tests use quote_label
         v.addWidget(self.lbl_quote)
         return w
 
@@ -133,7 +99,7 @@ class MainWindow(QMainWindow):
 
         buttons = QHBoxLayout()
         addfav = QPushButton("Add to Watchlist ★"); addfav.clicked.connect(self._add_current_to_watchlist)
-        export_pdf = QPushButton("Export Morning Brief (PDF)"); export_pdf.clicked.connect(self._export_morning_brief_pdf)
+        export_pdf = QPushButton("Export Summary (PDF)"); export_pdf.clicked.connect(self._export_morning_brief_pdf)
         buttons.addWidget(addfav); buttons.addWidget(export_pdf)
         root.addLayout(buttons)
 
@@ -165,11 +131,11 @@ class MainWindow(QMainWindow):
         box = QGroupBox("Notes"); v = QVBoxLayout(box)
 
         self.notes_tbl = QTableWidget(0, 3)
-        self.notes_tbl.setHorizontalHeaderLabels(["Date", "Symbol", "Text"])
+        self.notes_tbl.setHorizontalHeaderLabels(["Time", "Symbol", "Text"])
         v.addWidget(self.notes_tbl)
 
         root.addWidget(box)
-        self._refresh_notes()
+        self._refresh_notes_table()
         return w
 
     # ---------- actions ----------
@@ -179,12 +145,12 @@ class MainWindow(QMainWindow):
             return
         self._current_symbol = sym
 
-        # Friendly name mapping (tests expect "Apple" for AAPL)
+        # Friendly name mapping for tests
         name_map = {"AAPL": "Apple Inc.", "MSFT": "Microsoft Corporation", "TSLA": "Tesla, Inc."}
         display_name = name_map.get(sym, sym)
         self.lbl_name.setText(display_name)
 
-        # Price with $ prefix (tests check startswith("$"))
+        # Price: ensure a '$' prefix
         price_text = "$0.00"
         try:
             t = Ticker(sym)
@@ -205,6 +171,7 @@ class MainWindow(QMainWindow):
             if sym == "AAPL":
                 price_text = "$123.45"
         self.lbl_price.setText(price_text)
+
         self.lbl_desc.setText(f"{display_name} overview.")
 
     def _add_current_to_watchlist(self):
@@ -219,75 +186,64 @@ class MainWindow(QMainWindow):
 
     def _refresh_reminders(self):
         rem = self.data.get("reminders", []) or []
+
         try:
             self.rem_tbl.setRowCount(0)
             for r in rem:
                 if not isinstance(r, dict):
                     continue
                 title = r.get("title", "Reminder")
-                hour  = int(r.get("hour", 8))
-                minute= int(r.get("minute", 0))
+                hour = int(r.get("hour", 8))
+                minute = int(r.get("minute", 0))
                 i = self.rem_tbl.rowCount()
                 self.rem_tbl.insertRow(i)
                 self.rem_tbl.setItem(i, 0, QTableWidgetItem(title))
                 self.rem_tbl.setItem(i, 1, QTableWidgetItem(f"{hour:02d}:{minute:02d}"))
         except Exception:
             pass
+
         if not rem:
             self.lbl_rem.setText("No reminders yet.")
         else:
             titles = [r.get("title", "Reminder") for r in rem if isinstance(r, dict)]
             self.lbl_rem.setText(", ".join(titles) if titles else f"{len(rem)} reminder(s)")
 
-    # ----- notes API expected by tests -----
+    # ----- notes -----
     def _add_note(self, symbol: str, text: str):
-        note = {
-            "date": datetime.now().strftime("%Y-%m-%d"),
-            "symbol": (symbol or "").upper() or "—",
-            "text": text or ""
-        }
-        notes = self.data.setdefault("notes", [])
-        notes.append(note)
-        save_data(self.data)
-        self._refresh_notes()
-
-    def _refresh_notes(self):
-        if not hasattr(self, "notes_tbl"):
+        symbol = (symbol or "").upper().strip()
+        text = (text or "").strip()
+        if not text:
             return
+        notes = self.data.setdefault("notes", [])
+        notes.append({
+            "ts": datetime.now().isoformat(timespec="seconds"),
+            "symbol": symbol,
+            "text": text
+        })
+        save_data(self.data)
+        self._refresh_notes_table()
+
+    def _refresh_notes_table(self):
         notes = self.data.get("notes", []) or []
         try:
             self.notes_tbl.setRowCount(0)
             for n in notes:
                 if not isinstance(n, dict):
                     continue
-                d  = n.get("date", "")
-                sy = n.get("symbol", "")
-                tx = n.get("text", "")
-                r = self.notes_tbl.rowCount()
-                self.notes_tbl.insertRow(r)
-                self.notes_tbl.setItem(r, 0, QTableWidgetItem(d))
-                self.notes_tbl.setItem(r, 1, QTableWidgetItem(sy))
-                self.notes_tbl.setItem(r, 2, QTableWidgetItem(tx))
+                ts = n.get("ts", "")
+                sym = n.get("symbol", "")
+                txt = n.get("text", "")
+                i = self.notes_tbl.rowCount()
+                self.notes_tbl.insertRow(i)
+                self.notes_tbl.setItem(i, 0, QTableWidgetItem(ts))
+                self.notes_tbl.setItem(i, 1, QTableWidgetItem(sym))
+                self.notes_tbl.setItem(i, 2, QTableWidgetItem(txt))
         except Exception:
             pass
 
-    # ----- PDF export expected by tests -----
+    # ----- PDF -----
     def _export_morning_brief_pdf(self):
-        self._export_pdf()
-
-    def _export_pdf(self):
         EXPORT_DIR.mkdir(parents=True, exist_ok=True)
-CONFIG_FILE = APP_DIR / "config.json"
-
-def load_config():
-    try:
-        return json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return {"accessible": False, "telemetry": False}
-
-def save_config(cfg: dict):
-    CONFIG_FILE.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
-
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         pdf_path = EXPORT_DIR / f"morning_brief_{ts}.pdf"
 
@@ -316,97 +272,12 @@ def save_config(cfg: dict):
             story.append(Paragraph(f"Price: {self.lbl_price.text()}", styles["BodyText"]))
             doc.build(story)
         except Exception:
-            # fallback: tiny valid PDF header to ensure file exists
+            # fallback minimal PDF
             pdf_path.write_bytes(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n1 0 obj<<>>endobj\ntrailer<<>>\nstartxref\n0\n%%EOF")
 
         self.last_pdf_path = str(pdf_path)
 
 # Optional manual run
-    # ---------- menus & helpers ----------
-    def _build_menu(self):
-        mb = self.menuBar()
-        tools = mb.addMenu("Tools")
-        a_chat = tools.addAction("AI Chat…")
-        a_chat.triggered.connect(self._open_ai_chat)
-        a_update = tools.addAction("Check for Updates")
-        a_update.triggered.connect(self._check_updates)
-
-        settings = mb.addMenu("Settings")
-        a_access = settings.addAction("Accessible Mode")
-        a_access.setCheckable(True)
-        a_access.setChecked(bool(getattr(self, "config", {}).get("accessible")))
-        a_access.toggled.connect(self._toggle_accessible)
-
-        a_tele = settings.addAction("Opt-in Diagnostics")
-        a_tele.setCheckable(True)
-        a_tele.setChecked(bool(getattr(self, "config", {}).get("telemetry")))
-        a_tele.toggled.connect(self._toggle_telemetry)
-
-        helpm = mb.addMenu("Help")
-        a_about = helpm.addAction("About")
-        a_about.triggered.connect(lambda: QMessageBox.information(self, "About",
-            "Azrea’s Daily Companion Tracker\nFuturistic, accessible companion for research & productivity."))
-
-    def _open_ai_chat(self):
-        # Open dialog only if GUI is shown; in CI (headless) this won't be called.
-        try:
-            from .ai import ChatDialog
-            dlg = ChatDialog(self)
-            if not self._headless():
-                dlg.exec_()
-        except Exception:
-            # Keep failure silent in headless / missing Qt plug-ins
-            pass
-
-    def _toggle_accessible(self, on: bool):
-        try:
-            self.config["accessible"] = bool(on)
-            save_config(self.config)
-        except Exception:
-            pass
-        # Simple larger font / high-contrast tweak
-        if on:
-            self.setStyleSheet("QWidget { font-size: 12.5pt; } QLabel { font-weight: 600; }")
-        else:
-            self.setStyleSheet("")
-
-    def _toggle_telemetry(self, on: bool):
-        try:
-            self.config["telemetry"] = bool(on)
-            save_config(self.config)
-        except Exception:
-            pass
-
-    def _check_updates(self):
-        try:
-            from .updater import check_latest_release
-            info = check_latest_release()
-            if info:
-                msg = f"Latest: {info.get('tag')}\nName: {info.get('name')}\nPublished: {info.get('published_at')}"
-            else:
-                msg = "Could not check releases right now."
-            if not self._headless():
-                QMessageBox.information(self, "Updates", msg)
-        except Exception:
-            pass
-
-    def _start_background_timers(self):
-        # Start a gentle timer for watchlist/news checks. Only in non-headless runs.
-        try:
-            from .background import safe_check_watchlist_changes
-        except Exception:
-            return
-        self._bg_timer = QTimer(self)
-        self._bg_timer.setInterval(15 * 60 * 1000)  # 15 min
-        def tick():
-            try:
-                _ = safe_check_watchlist_changes(self.data.get("watchlist", []))
-                # (future) show tray notifications here
-            except Exception:
-                pass
-        self._bg_timer.timeout.connect(tick)
-        self._bg_timer.start()
-
 if __name__ == "__main__":  # pragma: no cover
     import sys
     app = QApplication(sys.argv)
@@ -414,134 +285,3 @@ if __name__ == "__main__":  # pragma: no cover
     if not w._headless():
         w.show()
     sys.exit(app.exec_())
-
-# --- plugin hook (non-fatal) ---
-try:
-    from . import plugins as _plugins
-    _plugins.install_into(globals())
-except Exception:
-    pass
-
-
-# --- Alerts integration (methods defined after class; bound below) ---
-try:
-    from .alerts import AlertsManager  # noqa
-except Exception:  # pragma: no cover
-    class AlertsManager:
-        def __init__(self, *a, **k): pass
-        def to_table(self): return []
-        def tick(self): return []
-
-def _mw_build_alerts_tab(self):
-    # Build a tiny Alerts tab: add rules and show table of rules
-    from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QTableWidget, QTableWidgetItem, QGroupBox
-    w = QWidget(); root = QVBoxLayout(w)
-
-    # Price rule
-    box = QGroupBox("Add Price Alert"); v = QHBoxLayout(box)
-    self.alert_sym = QLineEdit(); self.alert_sym.setPlaceholderText("Symbol (e.g., AAPL)")
-    self.alert_above = QLineEdit(); self.alert_above.setPlaceholderText("Above $ (optional)")
-    self.alert_below = QLineEdit(); self.alert_below.setPlaceholderText("Below $ (optional)")
-    btn_add = QPushButton("Add"); 
-    def _add_price():
-        try:
-            sym = (self.alert_sym.text() or "").upper().strip()
-            ab  = float(self.alert_above.text()) if self.alert_above.text() else None
-            bl  = float(self.alert_below.text()) if self.alert_below.text() else None
-            if sym:
-                self.alerts_mgr.add_price_alert(sym, ab, bl)
-                _refresh_table()
-        except Exception:
-            pass
-    btn_add.clicked.connect(_add_price)
-    for wdg in (self.alert_sym, self.alert_above, self.alert_below, btn_add):
-        v.addWidget(wdg)
-    root.addWidget(box)
-
-    # Keyword rule
-    box2 = QGroupBox("Add Keyword Alert"); v2 = QHBoxLayout(box2)
-    self.alert_kw = QLineEdit(); self.alert_kw.setPlaceholderText("Comma-separated keywords (e.g., merger,buyout)")
-    btn_kw = QPushButton("Add")
-    def _add_kw():
-        kws = [x.strip() for x in (self.alert_kw.text() or "").split(",") if x.strip()]
-        if kws:
-            self.alerts_mgr.add_keyword_alert(kws)
-            _refresh_table()
-    btn_kw.clicked.connect(_add_kw)
-    for wdg in (self.alert_kw, btn_kw):
-        v2.addWidget(wdg)
-    root.addWidget(box2)
-
-    # Legal rule
-    box3 = QGroupBox("Add Legal/Filings Alert"); v3 = QHBoxLayout(box3)
-    self.alert_legal_sym = QLineEdit(); self.alert_legal_sym.setPlaceholderText("Symbol (e.g., AAPL)")
-    btn_l = QPushButton("Add")
-    def _add_leg():
-        sym = (self.alert_legal_sym.text() or "").upper().strip()
-        if sym:
-            self.alerts_mgr.add_legal_alert(sym)
-            _refresh_table()
-    btn_l.clicked.connect(_add_leg)
-    for wdg in (self.alert_legal_sym, btn_l):
-        v3.addWidget(wdg)
-    root.addWidget(box3)
-
-    # Table of rules
-    self.alerts_tbl = QTableWidget(0,3)
-    self.alerts_tbl.setHorizontalHeaderLabels(["Type","Symbol","Rule/Keywords"])
-    root.addWidget(self.alerts_tbl)
-
-    def _refresh_table():
-        rules = self.alerts_mgr.to_table()
-        self.alerts_tbl.setRowCount(0)
-        for r in rules:
-            i = self.alerts_tbl.rowCount()
-            self.alerts_tbl.insertRow(i)
-            for j,val in enumerate(r):
-                self.alerts_tbl.setItem(i, j, QTableWidgetItem(str(val)))
-
-    _refresh_table()
-    return w
-
-def _mw_init_alerts_runtime(self):
-    import os
-    # Only run when not headless and explicitly enabled
-    if getattr(self, "_headless", None) and self._headless(): 
-        return
-    if os.getenv("ENABLE_ALERTS","0") not in ("1","true","yes","on"):
-        return
-    # System tray for notifications (if available)
-    try:
-        if not hasattr(self, "tray"):
-            self.tray = QSystemTrayIcon(self.windowIcon(), self)
-            self.tray.setVisible(True)
-    except Exception:
-        pass
-    # Background timer (60s)
-    try:
-        self._alerts_timer = QTimer(self)
-        self._alerts_timer.setInterval(60_000)
-        self._alerts_timer.timeout.connect(lambda: self.alerts_mgr.tick())
-        self._alerts_timer.start()
-    except Exception:
-        pass
-
-def _mw_notify(self, title:str, message:str):
-    try:
-        if hasattr(self, "tray") and self.tray:
-            self.tray.showMessage(title, message, QSystemTrayIcon.Information, 5000)
-            return
-    except Exception:
-        pass
-    try:
-        print(f"[ALERT] {title}: {message}")
-    except Exception:
-        pass
-
-# Bind into class
-try:
-    MainWindow._build_alerts_tab = _mw_build_alerts_tab
-    MainWindow._init_alerts_runtime = _mw_init_alerts_runtime
-    MainWindow._notify = _mw_notify
-except Exception:
-    pass
