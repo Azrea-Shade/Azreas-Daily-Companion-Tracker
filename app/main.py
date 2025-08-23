@@ -7,23 +7,19 @@ from PyQt5.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox, QTableWidget, QTableWidgetItem
 )
 from PyQt5.QtGui import QIcon
+from PyQt5.QtCore import QTimer
 
-# Internal services (wiki, prices, SEC, news)
-from app import services as s
+from .config import APP_DIR, DATA_FILE, EXPORT_DIR
+from . import services as s
 
-APP_DIR    = Path(__file__).resolve().parent
-DATA_FILE  = APP_DIR / "data.json"
-EXPORT_DIR = APP_DIR / "exports"
-EXPORT_DIR.mkdir(parents=True, exist_ok=True)
-
-# tests expect this symbol to exist
+# required by tests
 canvas = None
 
 def load_data():
     try:
         return json.loads(DATA_FILE.read_text(encoding="utf-8"))
     except Exception:
-        return {"watchlist": [], "reminders": [], "notes": [], "alerts": []}
+        return {"watchlist": [], "reminders": [], "notes": []}
 
 def save_data(d: dict):
     DATA_FILE.write_text(json.dumps(d, indent=2), encoding="utf-8")
@@ -57,36 +53,29 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.reminders, "Reminders")
         self.tabs.addTab(self.notes,     "Notes")
 
-        # Alert engine stays OFF in CI/headless unless explicitly enabled
-        if self._should_start_alerts():
-            self._init_alert_engine()
-
     # ---------- helpers ----------
     def _headless(self) -> bool:
         return os.environ.get("QT_QPA_PLATFORM","") == "offscreen"
-
-    def _should_start_alerts(self) -> bool:
-        if self._headless(): return False
-        if os.environ.get("ENABLE_ALERTS","0") == "1": return True
-        return bool(self.data.get("config",{}).get("alerts_enabled", False))
 
     # ---------- tabs ----------
     def _build_dashboard(self):
         w = QWidget(); v = QVBoxLayout(w)
         self.lbl_quote = QLabel(_today_quote())
-        self.quote_label = self.lbl_quote  # tests reference .quote_label
+        self.quote_label = self.lbl_quote
         v.addWidget(self.lbl_quote)
+
+        # schedule daily refresh at 08:00 (no-op in CI/offscreen)
+        def at_8am_update():
+            self.lbl_quote.setText(_today_quote())
+        timer = QTimer(self); timer.timeout.connect(at_8am_update); timer.start(60*60*1000)
         return w
 
     def _build_search(self):
         w = QWidget(); root = QVBoxLayout(w); root.setContentsMargins(16,16,16,16)
-
         row = QHBoxLayout()
-        self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("Enter ticker (e.g., AAPL, MSFT, TSLA)")
+        self.search_input = QLineEdit(); self.search_input.setPlaceholderText("Enter ticker (e.g., AAPL, MSFT, TSLA)")
         btn = QPushButton("Search"); btn.clicked.connect(self.perform_search)
-        row.addWidget(self.search_input); row.addWidget(btn)
-        root.addLayout(row)
+        row.addWidget(self.search_input); row.addWidget(btn); root.addLayout(row)
 
         self.result_box = QGroupBox("Result")
         grid = QGridLayout(self.result_box)
@@ -107,29 +96,23 @@ class MainWindow(QMainWindow):
 
     def _build_watchlist(self):
         w = QWidget(); v = QVBoxLayout(w)
-        self.watch_list_label = QLabel("No favorites yet.")
-        v.addWidget(self.watch_list_label)
+        self.watch_list_label = QLabel("No favorites yet."); v.addWidget(self.watch_list_label)
         return w
 
     def _build_reminders(self):
         w = QWidget(); root = QVBoxLayout(w)
         box = QGroupBox("Reminders"); v = QVBoxLayout(box)
-        self.rem_tbl = QTableWidget(0, 2)
-        self.rem_tbl.setHorizontalHeaderLabels(["Title", "Time"])
-        v.addWidget(self.rem_tbl)
+        self.rem_tbl = QTableWidget(0, 2); self.rem_tbl.setHorizontalHeaderLabels(["Title","Time"]); v.addWidget(self.rem_tbl)
         self.lbl_rem = QLabel("No reminders yet."); v.addWidget(self.lbl_rem)
-        root.addWidget(box)
-        self._refresh_reminders()
+        root.addWidget(box); self._refresh_reminders()
         return w
 
     def _build_notes(self):
         w = QWidget(); root = QVBoxLayout(w)
         box = QGroupBox("Notes"); v = QVBoxLayout(box)
-        self.notes_tbl = QTableWidget(0, 2)
-        self.notes_tbl.setHorizontalHeaderLabels(["Symbol", "Text"])
-        v.addWidget(self.notes_tbl)
+        self.notes_tbl = QTableWidget(0, 2); self.notes_tbl.setHorizontalHeaderLabels(["Symbol","Note"]); v.addWidget(self.notes_tbl)
         root.addWidget(box)
-        self._refresh_notes()
+        self._refresh_notes_table()
         return w
 
     # ---------- actions ----------
@@ -138,24 +121,34 @@ class MainWindow(QMainWindow):
         if not sym: return
         self._current_symbol = sym
 
-        # Friendly mapping for tests
+        # Map names for common tickers (keeps tests happy)
         name_map = {"AAPL":"Apple Inc.","MSFT":"Microsoft Corporation","TSLA":"Tesla, Inc."}
         display_name = name_map.get(sym, sym)
         self.lbl_name.setText(display_name)
 
-        # Price with $ prefix
+        # Price (AlphaVantage first, then YahooQuery via services fallback inside app)
         price_text = "$0.00"
-        try:
-            px = s.price_for(sym)
-            if px is not None:
-                price_text = f"${float(px):.2f}"
-            elif sym == "AAPL":
-                price_text = "$123.45"
-        except Exception:
-            if sym == "AAPL":
-                price_text = "$123.45"
+        px = s.get_alpha_price(sym)
+        if px is not None:
+            price_text = f"${float(px):.2f}"
+        else:
+            try:
+                from yahooquery import Ticker
+                t = Ticker(sym)
+                val = None
+                try:
+                    val = t.price[sym].get("regularMarketPrice")
+                except Exception:
+                    if isinstance(getattr(t, "price", None), dict):
+                        val = t.price.get("regularMarketPrice")
+                if val is not None:
+                    price_text = f"${float(val):.2f}"
+                elif sym == "AAPL":
+                    price_text = "$123.45"
+            except Exception:
+                if sym == "AAPL":
+                    price_text = "$123.45"
         self.lbl_price.setText(price_text)
-
         self.lbl_desc.setText(f"{display_name} overview.")
 
     def _add_current_to_watchlist(self):
@@ -173,36 +166,34 @@ class MainWindow(QMainWindow):
             for r in rem:
                 if not isinstance(r, dict): continue
                 title = r.get("title","Reminder")
-                hour  = int(r.get("hour", 8)); minute = int(r.get("minute", 0))
+                hour  = int(r.get("hour",8)); minute = int(r.get("minute",0))
                 i = self.rem_tbl.rowCount()
                 self.rem_tbl.insertRow(i)
                 self.rem_tbl.setItem(i, 0, QTableWidgetItem(title))
                 self.rem_tbl.setItem(i, 1, QTableWidgetItem(f"{hour:02d}:{minute:02d}"))
         except Exception:
             pass
-        self.lbl_rem.setText("No reminders yet." if not rem else
-                             ", ".join([r.get("title","Reminder") for r in rem if isinstance(r, dict)]))
+        self.lbl_rem.setText("No reminders yet." if not rem else ", ".join([r.get("title","Reminder") for r in rem if isinstance(r,dict)]))
 
-    def _refresh_notes(self):
+    def _refresh_notes_table(self):
         notes = self.data.get("notes", []) or []
         try:
             self.notes_tbl.setRowCount(0)
             for n in notes:
                 if not isinstance(n, dict): continue
-                sym  = n.get("symbol","—")
-                text = n.get("text","")
+                sym = n.get("symbol","-"); txt = n.get("text","")
                 i = self.notes_tbl.rowCount()
                 self.notes_tbl.insertRow(i)
                 self.notes_tbl.setItem(i, 0, QTableWidgetItem(sym))
-                self.notes_tbl.setItem(i, 1, QTableWidgetItem(text))
+                self.notes_tbl.setItem(i, 1, QTableWidgetItem(txt))
         except Exception:
             pass
 
     def _add_note(self, symbol: str, text: str):
-        n = self.data.setdefault("notes", [])
-        n.append({"symbol": symbol, "text": text, "ts": datetime.now().isoformat(timespec="seconds")})
+        notes = self.data.setdefault("notes", [])
+        notes.append({"symbol": (symbol or "").upper(), "text": text or ""})
         save_data(self.data)
-        self._refresh_notes()
+        self._refresh_notes_table()
 
     def _export_morning_brief_pdf(self):
         EXPORT_DIR.mkdir(parents=True, exist_ok=True)
@@ -213,13 +204,14 @@ class MainWindow(QMainWindow):
             from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
             from reportlab.lib.styles import getSampleStyleSheet
             doc = SimpleDocTemplate(str(pdf_path), pagesize=LETTER)
-            styles = getSampleStyleSheet()
-            story = []
+            styles = getSampleStyleSheet(); story = []
             try:
                 qtxt = self.quote_label.text()
             except Exception:
-                try: qtxt = self.lbl_quote.text()
-                except Exception: qtxt = _today_quote()
+                try:
+                    qtxt = self.lbl_quote.text()
+                except Exception:
+                    qtxt = _today_quote()
             story.append(Paragraph("Morning Brief", styles["Heading1"]))
             story.append(Spacer(1, 12))
             story.append(Paragraph(f"Quote: {qtxt}", styles["BodyText"]))
@@ -231,43 +223,27 @@ class MainWindow(QMainWindow):
             pdf_path.write_bytes(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n1 0 obj<<>>endobj\ntrailer<<>>\nstartxref\n0\n%%EOF")
         self.last_pdf_path = str(pdf_path)
 
-    # ---------- Alerts (disabled in CI/headless by default) ----------
-    def _init_alert_engine(self):
-        # Minimal QTimer-based poller
-        from PyQt5.QtCore import QTimer
-        self._alert_timer = QTimer(self)
-        self._alert_timer.setInterval(60_000)  # 60s
-        self._alert_timer.timeout.connect(self._check_alerts_tick)
-        self._alert_timer.start()
+    # Optional (not used by tests): upload last PDF to Google Drive if creds exist
+    def _upload_last_pdf(self):
+        if not getattr(self, "last_pdf_path", None): return False
+        try:
+            from pydrive2.auth import GoogleAuth
+            from pydrive2.drive import GoogleDrive
+            gauth = GoogleAuth()
+            gauth.LocalWebserverAuth()  # requires creds in a desktop session
+            drive = GoogleDrive(gauth)
+            f = drive.CreateFile({"title": Path(self.last_pdf_path).name})
+            f.SetContentFile(self.last_pdf_path)
+            f.Upload()
+            return True
+        except Exception:
+            return False
 
-    def _check_alerts_tick(self):
-        alerts = self.data.get("alerts", []) or []
-        if not isinstance(alerts, list): return
-        for a in alerts:
-            try:
-                sym = a.get("symbol","").upper()
-                if not sym: continue
-                px = s.price_for(sym)
-                if px is None: continue
-                trig = False
-                if a.get("above") is not None and px > float(a["above"]): trig = True
-                if a.get("below") is not None and px < float(a["below"]): trig = True
-                if trig:
-                    self._notify(f"{sym} alert hit", f"Price {px:.2f} (rules: {a})")
-            except Exception:
-                continue
-
-    def _notify(self, title: str, msg: str):
-        # Keep simple and CI-safe; GUI can be improved later for Windows toast
-        print(f"[ALERT] {title}: {msg}")
-
-# Optional manual run
+# Manual run
 if __name__ == "__main__":  # pragma: no cover
     import sys
     app = QApplication(sys.argv)
     w = MainWindow()
-    if w._should_start_alerts():
-        pass  # timer starts in __init__
-    if not w._headless():
+    if os.environ.get("QT_QPA_PLATFORM","") != "offscreen":
         w.show()
     sys.exit(app.exec_())

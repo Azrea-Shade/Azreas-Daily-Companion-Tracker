@@ -4,11 +4,7 @@ pyqt5
 requests
 yahooquery
 reportlab
-fpdf
 pydrive2
 packaging
 pytest
 pytest-mock
-win10toast==0.9
-feedparser
-python-dotenv
