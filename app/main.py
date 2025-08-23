@@ -1079,62 +1079,62 @@ def _export_notes_csv(self):
     except Exception as e:
         self._warn("Export", f"Failed to export notes:\n{e}")
 
-class SettingsDialog(QDialog):
-    def __init__(self, cfg: dict, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Settings")
-        self.setStyleSheet(f"background:{CARD};")
-        self.cfg = cfg.copy()
+class SettingsDialog(QDialog):    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("🌌 Azrea’s Daily Companion Tracker")
+        self.setMinimumSize(1100, 760)
 
-        form = QFormLayout(self)
+        # App icon (optional)
+        icon_path = APP_DIR / "assets" / "app_icon.ico"
+        if icon_path.exists():
+            self.setWindowIcon(QIcon(str(icon_path)))
+        else:
+            self.setWindowIcon(QIcon())
 
-        self.chk_quote = QCheckBox("Show 8:00 AM quote")
-        self.chk_startup = QCheckBox("Start with Windows (current user)")
-        self.chk_startup.setChecked(is_startup_enabled())
-        self.chk_minimize = QCheckBox("Minimize to tray on close")
-        self.chk_minimize.setChecked(bool(self.cfg.get("minimize_to_tray", False)))
-        self.chk_launchmin = QCheckBox("Launch minimized to tray")
-        self.chk_launchmin.setChecked(bool(self.cfg.get("launch_minimized", False)))
-        self.chk_quote.setChecked(bool(self.cfg.get("auto_quote_8am", True)))
-        form.addRow(self.chk_quote)
-        form.addRow(self.chk_startup)
-        form.addRow(self.chk_minimize)
-        form.addRow(self.chk_launchmin)
+        # Load data/config and migrate schema
+        self.data = load_data()
+        self.config = load_config()
+        if "notes" not in self.data:
+            self.data["notes"] = []
+            try:
+                save_data(self.data)
+            except Exception:
+                pass
 
-        self.spin_pct = QSpinBox(); self.spin_pct.setRange(1, 50)
-        self.spin_pct.setValue(int(self.cfg.get("price_alert_pct", 3)))
-        form.addRow("Price alert threshold (%)", self.spin_pct)
+        # Tabs container
+        self.tabs = QTabWidget()
+        self.setCentralWidget(self.tabs)
 
-        self.spin_news = QSpinBox(); self.spin_news.setRange(5, 120)
-        self.spin_news.setValue(int(self.cfg.get("news_poll_minutes", 15)))
-        form.addRow("News check interval (minutes)", self.spin_news)
+        # Build sections
+        self.dashboard = self._build_dashboard()
+        self.search    = self._build_search()
+        self.watchlist = self._build_watchlist()
+        self.reminders = self._build_reminders()
+        # Notes & AI are optional; fall back to empty widgets if not present
+        self.notes     = getattr(self, "_build_notes",    lambda: QWidget())()
+        self.ai        = getattr(self, "_build_ai_tab",   lambda: QWidget())()
 
-        self.spin_update = QSpinBox(); self.spin_update.setRange(1, 168)
-        self.spin_update.setValue(int(self.cfg.get("update_check_hours", 24)))
-        form.addRow("Update check interval (hours)", self.spin_update)
+        # Add tabs (order: Dashboard, Search, Watchlist, Reminders, Notes, AI)
+        self.tabs.addTab(self.dashboard, "🏠 Dashboard")
+        self.tabs.addTab(self.search,    "🔎 Search")
+        self.tabs.addTab(self.watchlist, "⭐ Watchlist")
+        self.tabs.addTab(self.reminders, "⏰ Reminders")
+        self.tabs.addTab(self.notes,     "🗒️ Notes")
+        if getattr(self, "_build_ai_tab", None):
+            self.tabs.addTab(self.ai,  "🤖 AI")
 
-        self.txt_legal = QPlainTextEdit()
-        self.txt_legal.setPlainText(self.cfg.get("legal_keywords", ", ".join(DEFAULT_LEGAL_WORDS)))
-        self.txt_legal.setFixedHeight(80)
-        form.addRow("Legal keywords (comma-separated)", self.txt_legal)
+        # Continue with any post-init routines
+        try:
+            self._maybe_check_updates_silent()
+        except Exception:
+            pass
 
-        self.inp_openai = QLineEdit(); self.inp_openai.setEchoMode(QLineEdit.Password)
-        self.inp_openai.setPlaceholderText("(optional) store OPENAI_API_KEY")
-        self.inp_openai.setText(self.cfg.get("openai_api_key",""))
-        form.addRow("OpenAI API key", self.inp_openai)
-
-        self.inp_news = QLineEdit(); self.inp_news.setEchoMode(QLineEdit.Password)
-        self.inp_news.setPlaceholderText("(optional) store NEWSAPI_KEY")
-        self.inp_news.setText(self.cfg.get("newsapi_key",""))
-        form.addRow("NewsAPI key", self.inp_news)
-
-        row = QHBoxLayout()
-        save = QPushButton("Save"); cancel = QPushButton("Cancel")
-        row.addWidget(save); row.addWidget(cancel)
-        form.addRow(row)
-
-        save.clicked.connect(self._do_save)
-        cancel.clicked.connect(self.reject)
+        # Honor launch_minimized setting (safe on CI/headless)
+        try:
+            if self.config.get("launch_minimized", False) and not self._headless():
+                self.hide()
+        except Exception:
+            pass
 
     def _do_save(self):
         self.cfg["auto_quote_8am"] = self.chk_quote.isChecked()
